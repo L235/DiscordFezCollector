@@ -1,0 +1,5 @@
+pywikibot
+discord.py
+boto3
+requests-sse
+sseclient
