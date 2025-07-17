@@ -2,11 +2,11 @@
 """
 fez_collector — Discord edition
 --------------------------------
-* Replaces IRC output with Discord messages.
+* Monitors MediaWiki EventStreams and posts changes to Discord.
 * Reads **and** persists state (config) to a JSON file whose location is
   supplied in the `FEZ_COLLECTOR_STATE` environment variable.
 * Lets authorised users update the config live from Discord commands.
-* **v1 config schema (per‑user threads):**
+* **Config schema (per‑user threads):**
 
       {
           "users": {
@@ -19,7 +19,7 @@ fez_collector — Discord edition
 
   When a user is *included*, a dedicated thread is (lazily) created in the
   configured parent channel and its ID recorded. Unincluding a user preserves
-  the thread mapping for later reuse. The legacy "exclude" concept is removed.
+  the thread mapping for later reuse.
 """
 VERSION = "0.5-discord"
 print(f"fez_collector {VERSION} initialising…")
@@ -49,32 +49,14 @@ if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
     sys.exit("❌  FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
 
 # --------------------------------------------------------------------------- #
-# ── Config management / migration                                            #
+# ── Config management                                                        #
 # --------------------------------------------------------------------------- #
 
-# v1 schema
-# {"users": {"Username": {"included": bool, "thread_id": int|None}}}
+# Config schema: {"users": {"Username": {"included": bool, "thread_id": int|None}}}
 DEFAULT_CONFIG = {"users": {}}
 
 
-def _migrate_legacy(cfg: dict) -> dict:
-    """
-    Upgrade legacy configs that used userIncludeList/userExcludeList.
-    Excluded users become included=False; included users=True.
-    Thread IDs cannot be recovered retroactively; set None.
-    """
-    if "users" in cfg:
-        # Already new schema
-        return cfg
 
-    users_cfg = {}
-    inc = cfg.get("userIncludeList", []) or []
-    exc = cfg.get("userExcludeList", []) or []
-    for u in set(inc) | set(exc):
-        users_cfg[u] = {"included": (u in inc), "thread_id": None}
-
-    migrated = {"users": users_cfg}
-    return migrated
 
 
 def load_config() -> dict:
@@ -84,11 +66,7 @@ def load_config() -> dict:
         return DEFAULT_CONFIG.copy()
     with STATE_FILE.open(encoding="utf-8") as fp:
         raw = json.load(fp)
-    cfg = _migrate_legacy(raw)
-    # Persist migration if needed
-    if cfg != raw:
-        save_config(cfg)
-    return cfg
+    return raw
 
 
 def save_config(cfg: dict) -> None:
