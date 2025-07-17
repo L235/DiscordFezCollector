@@ -161,43 +161,10 @@ async def stream_worker(channel: discord.TextChannel):
     loop = asyncio.get_running_loop()
 
     async def get_user_thread(user: str) -> discord.abc.Messageable:
-        """
-        Return the Discord thread (or fallback channel) for a user.
-        Creates the thread if needed & permitted.
-        """
-        async with CONFIG_LOCK:
-            user_entry = CONFIG["users"].get(user)
-            # Only post if user exists and is marked included
-            if not user_entry or not user_entry.get("included", False):
-                return None
-            thread_id = user_entry.get("thread_id")
-
-        # Try to fetch existing thread if we have an ID
-        thread_chan = None
-        if thread_id:
-            try:
-                thread_chan = await bot.fetch_channel(thread_id)
-            except Exception:
-                thread_chan = None
-
-        # Create a new thread if missing
-        if thread_chan is None:
-            try:
-                # XXX choose public vs. private; using public for visibility
-                thread_chan = await channel.create_thread(
-                    name=f"fez-{user}",
-                    type=discord.ChannelType.public_thread
-                )
-            except Exception as e:  # pragma: no cover
-                print(f"⚠️  Failed to create thread for {user}: {e}")
-                return channel  # fallback to parent
-            # Persist the new thread ID
-            async with CONFIG_LOCK:
-                CONFIG["users"].setdefault(user, {"included": True, "thread_id": None})
-                CONFIG["users"][user]["thread_id"] = thread_chan.id
-                save_config(CONFIG)
-
-        return thread_chan
+        """Get (or lazily create) the thread for a user, falling back to parent."""
+        thread = await ensure_user_thread(user, parent_channel=channel, create=True)
+        # ensure_user_thread() returns None if user not included; parent channel if creation failed
+        return thread
 
     async def should_post(user: str) -> bool:
         async with CONFIG_LOCK:
@@ -248,10 +215,9 @@ async def quit_cmd(ctx: commands.Context):
 async def _set_user_included(ctx, user: str, included: bool):
     """
     Mark a user as included/unincluded.
-    When including: create thread lazily (first event) to avoid extra perms churn;
-    we *can* eagerly create here if desired (set eager=True below).
+    When including: eagerly create (or reuse) that user's thread immediately,
+    storing its ID in config. On uninclude we retain the thread mapping.
     """
-    eager_create_thread = False  # flip if you want thread immediately
     async with CONFIG_LOCK:
         entry = CONFIG["users"].get(user)
         if entry is None:
@@ -267,25 +233,23 @@ async def _set_user_included(ctx, user: str, included: bool):
             action = "updated"
         save_config(CONFIG)
 
-    # Optionally create thread immediately on include
-    if included and eager_create_thread:
+    # Eager thread creation when including
+    if included:
         parent_channel = ctx.guild.get_channel(DISCORD_CHANNEL_ID)
         if parent_channel is None:
             parent_channel = await bot.fetch_channel(DISCORD_CHANNEL_ID)
-        # Reuse stream_worker helper by inlining minimal logic
-        try:
-            thread_chan = await parent_channel.create_thread(
-                name=f"fez-{user}",
-                type=discord.ChannelType.public_thread
-            )
-            async with CONFIG_LOCK:
-                CONFIG["users"][user]["thread_id"] = thread_chan.id
-                save_config(CONFIG)
-        except Exception as e:  # pragma: no cover
-            await ctx.reply(f"⚠️  Included `{user}` but could not create thread: {e}")
+        thread_chan = await ensure_user_thread(user, parent_channel=parent_channel, create=True)
+        if thread_chan is None:
+            await ctx.reply(f"⚠️  Included `{user}` but user not in config? (race) Saved anyway.")
             return
+        if thread_chan == parent_channel:
+            await ctx.reply(f"⚠️  Included `{user}`, but could not create/find a thread; will post in parent channel. Saved ✓")
+            return
+        await ctx.reply(f"`{user}` {action} to included. Thread: <#{thread_chan.id}>. Saved ✓")
+        return
 
-    await ctx.reply(f"`{user}` {action} to {'included' if included else 'unincluded'} and saved ✓")
+    # Unincluded path
+    await ctx.reply(f"`{user}` {action} to unincluded (thread retained). Saved ✓")
 
 
 @bot.command(name="include")
@@ -309,6 +273,62 @@ async def showconfig_cmd(ctx: commands.Context):
     async with CONFIG_LOCK:
         pretty = json.dumps(CONFIG, indent=2)
     await ctx.reply(f"```json\n{pretty}\n```")
+
+
+# --------------------------------------------------------------------------- #
+# ── Thread utilities                                                         #
+# --------------------------------------------------------------------------- #
+
+async def ensure_user_thread(
+    user: str,
+    *,
+    parent_channel: discord.TextChannel,
+    create: bool = True
+) -> discord.abc.Messageable | None:
+    """
+    Ensure a thread exists (and is recorded) for `user`.
+
+    Returns:
+      * Thread channel object if user included and (found or created) thread OK.
+      * Parent channel if user included but we failed to create/fetch the thread.
+      * None if user is not included (do nothing).
+
+    Thread type: public thread (adjust if you need private).
+    """
+    async with CONFIG_LOCK:
+        entry = CONFIG["users"].get(user)
+        if not entry or not entry.get("included", False):
+            return None
+        thread_id = entry.get("thread_id")
+
+    # Try existing thread
+    if thread_id:
+        try:
+            thread = await bot.fetch_channel(thread_id)
+            if isinstance(thread, discord.Thread):
+                return thread
+        except Exception:
+            thread = None
+
+    # Create a new thread if allowed
+    if create:
+        try:
+            thread = await parent_channel.create_thread(
+                name=f"User:{user}",
+                type=discord.ChannelType.public_thread
+            )
+        except Exception as e:  # pragma: no cover
+            print(f"⚠️  Failed to create thread for {user}: {e}")
+            return parent_channel
+        # Persist ID
+        async with CONFIG_LOCK:
+            CONFIG["users"].setdefault(user, {"included": True, "thread_id": None})
+            CONFIG["users"][user]["thread_id"] = thread.id
+            save_config(CONFIG)
+        return thread
+
+    # No creation requested; fall back
+    return parent_channel
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
