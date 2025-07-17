@@ -139,9 +139,9 @@ async def stream_worker(channel: discord.TextChannel):
     loop = asyncio.get_running_loop()
 
     async def get_user_thread(user: str) -> discord.abc.Messageable:
-        """Get (or lazily create) the thread for a user, falling back to parent."""
-        thread = await ensure_user_thread(user, parent_channel=channel, create=True)
-        # ensure_user_thread() returns None if user not included; parent channel if creation failed
+        """Get the thread for a user, falling back to parent if thread doesn't exist."""
+        thread = await ensure_user_thread(user, parent_channel=channel, create=False)
+        # ensure_user_thread() returns None if user not included; parent channel if thread not found
         return thread
 
     async def should_post(user: str) -> bool:
@@ -194,7 +194,7 @@ async def _set_user_included(ctx, user: str, included: bool):
     """
     Mark a user as included/unincluded.
     When including: eagerly create (or reuse) that user's thread immediately,
-    storing its ID in config. On uninclude we retain the thread mapping.
+    storing its ID in config. On remove we retain the thread mapping.
     """
     async with CONFIG_LOCK:
         entry = CONFIG["users"].get(user)
@@ -205,7 +205,7 @@ async def _set_user_included(ctx, user: str, included: bool):
         else:
             prev = entry.get("included", False)
             if prev == included:
-                await ctx.reply(f"`{user}` already {'included' if included else 'unincluded'}.")
+                await ctx.reply(f"`{user}` already {'added' if included else 'removed'}.")
                 return
             entry["included"] = included
             action = "updated"
@@ -218,29 +218,29 @@ async def _set_user_included(ctx, user: str, included: bool):
             parent_channel = await bot.fetch_channel(DISCORD_CHANNEL_ID)
         thread_chan = await ensure_user_thread(user, parent_channel=parent_channel, create=True)
         if thread_chan is None:
-            await ctx.reply(f"⚠️  Included `{user}` but user not in config? (race) Saved anyway.")
+            await ctx.reply(f"⚠️  Added `{user}` but user not in config? (race) Saved anyway.")
             return
         if thread_chan == parent_channel:
-            await ctx.reply(f"⚠️  Included `{user}`, but could not create/find a thread; will post in parent channel. Saved ✓")
+            await ctx.reply(f"⚠️  Added `{user}`, but could not create/find a thread; will post in parent channel.")
             return
-        await ctx.reply(f"`{user}` {action} to included. Thread: <#{thread_chan.id}>. Saved ✓")
+        await ctx.reply(f"`{user}` {action} to added. Thread: <#{thread_chan.id}>.")
         return
 
-    # Unincluded path
-    await ctx.reply(f"`{user}` {action} to unincluded (thread retained). Saved ✓")
+    # Removed path
+    await ctx.reply(f"`{user}` {action} to removed (thread retained).")
 
 
-@bot.command(name="include")
+@bot.command(name="add")
 @commands.check(authorised)
-async def include_cmd(ctx: commands.Context, *, user: str):
-    """!include <Username> → start tracking a user (creates/uses dedicated thread)."""
+async def add_cmd(ctx: commands.Context, *, user: str):
+    """!add <Username> → start tracking a user (creates/uses dedicated thread)."""
     await _set_user_included(ctx, user, True)
 
 
-@bot.command(name="uninclude")
+@bot.command(name="remove")
 @commands.check(authorised)
-async def uninclude_cmd(ctx: commands.Context, *, user: str):
-    """!uninclude <Username> → stop tracking a user (thread retained)."""
+async def remove_cmd(ctx: commands.Context, *, user: str):
+    """!remove <Username> → stop tracking a user (thread retained)."""
     await _set_user_included(ctx, user, False)
 
 
@@ -267,7 +267,8 @@ async def ensure_user_thread(
     Ensure a thread exists (and is recorded) for `user`.
 
     Returns:
-      * Thread channel object if user included and (found or created) thread OK.
+      * Thread channel object if user included and thread exists/found.
+      * Parent channel if user included but thread doesn't exist and create=False.
       * Parent channel if user included but we failed to create/fetch the thread.
       * None if user is not included (do nothing).
 
@@ -305,7 +306,7 @@ async def ensure_user_thread(
             save_config(CONFIG)
         return thread
 
-    # No creation requested; fall back
+    # No creation requested and no existing thread; fall back to parent
     return parent_channel
 
 # --------------------------------------------------------------------------- #
