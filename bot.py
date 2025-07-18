@@ -14,7 +14,6 @@ fez_collector — Discord edition
 
 **Available Commands:**
 * `!ping` - Test bot responsiveness
-* `!fezquit` - Shutdown the bot (moderators only)
 * `!add <Username>` - Start tracking a user (creates dedicated thread)
 * `!remove <Username>` - Stop tracking a user (thread retained)
 * `!showconfig` - Display current configuration
@@ -524,15 +523,6 @@ def authorised(ctx) -> bool:
                     with_app_command=True)
 async def ping_cmd(ctx: commands.Context):
     await ctx.reply("pong")
-
-
-@bot.hybrid_command(name="fezquit",
-                    description="Shut the bot down (moderators only)",
-                    with_app_command=True)
-@commands.check(authorised)
-async def quit_cmd(ctx: commands.Context):
-    await ctx.message.add_reaction("👋")
-    await bot.close()
 
 
 async def _set_user_included(ctx, user: str, included: bool):
