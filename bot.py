@@ -78,6 +78,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
+from discord import app_commands           # <-- new (optional in this patch)
 from pywikibot import Site
 from pywikibot.comms.eventstreams import EventStreams
 
@@ -376,9 +377,10 @@ stream = EventStreams(
 # ── Discord bot setup                                                        #
 # --------------------------------------------------------------------------- #
 
+# Keep message‑content so legacy “!” commands still work, but the new UX is via “/”.
 intents = discord.Intents.default()
-intents.message_content = True  # needed for on_message / commands with prefix
-bot = commands.Bot(command_prefix="!", intents=intents)
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)  # prefix kept for BC
 
 # --------------------------------------------------------------------------- #
 # ── Message formatting                                                        #
@@ -517,12 +519,16 @@ def authorised(ctx) -> bool:
     return ctx.author.guild_permissions.manage_guild or ctx.author.id == bot.owner_id
 
 
-@bot.command(name="ping")
+@bot.hybrid_command(name="ping",
+                    description="Test bot responsiveness",
+                    with_app_command=True)
 async def ping_cmd(ctx: commands.Context):
     await ctx.reply("pong")
 
 
-@bot.command(name="fezquit")
+@bot.hybrid_command(name="fezquit",
+                    description="Shut the bot down (moderators only)",
+                    with_app_command=True)
 @commands.check(authorised)
 async def quit_cmd(ctx: commands.Context):
     await ctx.message.add_reaction("👋")
@@ -569,21 +575,27 @@ async def _set_user_included(ctx, user: str, included: bool):
     await ctx.reply(f"`{user}` {action} to removed (thread retained).")
 
 
-@bot.command(name="add")
+@bot.hybrid_command(name="add",
+                    description="Start tracking a user",
+                    with_app_command=True)
 @commands.check(authorised)
 async def add_cmd(ctx: commands.Context, *, user: str):
     """!add <Username> → start tracking a user (creates/uses dedicated thread)."""
     await _set_user_included(ctx, user, True)
 
 
-@bot.command(name="remove")
+@bot.hybrid_command(name="remove",
+                    description="Stop tracking a user",
+                    with_app_command=True)
 @commands.check(authorised)
 async def remove_cmd(ctx: commands.Context, *, user: str):
     """!remove <Username> → stop tracking a user (thread retained)."""
     await _set_user_included(ctx, user, False)
 
 
-@bot.command(name="showconfig")
+@bot.hybrid_command(name="showconfig",
+                    description="Display current configuration",
+                    with_app_command=True)
 @commands.check(authorised)
 async def showconfig_cmd(ctx: commands.Context):
     """Dump the current config."""
@@ -628,7 +640,9 @@ def _deepcopy_cfg(obj: Any) -> Any:
         return obj
 
 
-@bot.command(name="create")
+@bot.hybrid_command(name="create",
+                    description="Create a custom-filter thread (parent channel only)",
+                    with_app_command=True)
 @commands.check(authorised)
 async def create_custom_thread_cmd(ctx: commands.Context, *, threadname: str = ""):
     """!create <threadname> → create a custom filter thread (in parent channel only)."""
@@ -661,7 +675,9 @@ async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
     return entry
 
 
-@bot.command(name="activate")
+@bot.hybrid_command(name="activate",
+                    description="Activate current custom thread",
+                    with_app_command=True)
 @commands.check(authorised)
 async def activate_custom_thread_cmd(ctx: commands.Context):
     entry = await _require_custom_thread(ctx)
@@ -674,7 +690,9 @@ async def activate_custom_thread_cmd(ctx: commands.Context):
         await ctx.reply("Failed to activate (missing config?).")
 
 
-@bot.command(name="deactivate")
+@bot.hybrid_command(name="deactivate",
+                    description="Deactivate current custom thread",
+                    with_app_command=True)
 @commands.check(authorised)
 async def deactivate_custom_thread_cmd(ctx: commands.Context):
     entry = await _require_custom_thread(ctx)
@@ -687,13 +705,18 @@ async def deactivate_custom_thread_cmd(ctx: commands.Context):
         await ctx.reply("Failed to deactivate (missing config?).")
 
 
-@bot.group(name="config", invoke_without_command=True)
+@bot.hybrid_group(name="config",
+                  invoke_without_command=True,
+                  description="Thread configuration operations",
+                  with_app_command=True)
 @commands.check(authorised)
 async def config_group(ctx: commands.Context):
     await ctx.reply("Subcommands: `get`, `set <key> <json>`, `add <key> <value>`, `remove <key> <value>`, `clear <key>`.")
 
 
-@config_group.command(name="get")
+@config_group.command(name="get",
+                      description="Show current thread configuration",
+                      with_app_command=True)
 @commands.check(authorised)
 async def config_get_cmd(ctx: commands.Context):
     entry = await _require_custom_thread(ctx)
@@ -703,7 +726,9 @@ async def config_get_cmd(ctx: commands.Context):
     await ctx.reply(f"```json\n{pretty}\n```")
 
 
-@config_group.command(name="set")
+@config_group.command(name="set",
+                      description="Set a configuration key",
+                      with_app_command=True)
 @commands.check(authorised)
 async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     entry = await _require_custom_thread(ctx)
@@ -720,7 +745,9 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
         await ctx.reply("Failed to set.")
 
 
-@config_group.command(name="add")
+@config_group.command(name="add",
+                      description="Append value(s) to a list key",
+                      with_app_command=True)
 @commands.check(authorised)
 async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
     entry = await _require_custom_thread(ctx)
@@ -734,7 +761,9 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
         await ctx.reply("Failed to add.")
 
 
-@config_group.command(name="remove")
+@config_group.command(name="remove",
+                      description="Remove value(s) from a list key",
+                      with_app_command=True)
 @commands.check(authorised)
 async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
     entry = await _require_custom_thread(ctx)
@@ -748,7 +777,9 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
         await ctx.reply("Failed to remove.")
 
 
-@config_group.command(name="clear")
+@config_group.command(name="clear",
+                      description="Clear a list key",
+                      with_app_command=True)
 @commands.check(authorised)
 async def config_clear_cmd(ctx: commands.Context, key: str):
     entry = await _require_custom_thread(ctx)
@@ -824,6 +855,13 @@ async def ensure_user_thread(
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (id {bot.user.id})")
+    # Register (or update) global application commands with Discord.
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅  Synced {len(synced)} application command(s)")
+    except Exception as e:
+        print(f"⚠️  Failed to sync application commands: {e}")
+
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
     # Preload custom thread entries for existing threads (best effort)
     async with CONFIG_LOCK:
