@@ -454,7 +454,7 @@ async def ping_cmd(ctx: commands.Context):
     await ctx.reply("pong")
 
 
-@bot.hybrid_command(name="help",
+@bot.hybrid_command(name="fezhelp",
                     description="Show available commands",
                     with_app_command=True)
 async def help_cmd(ctx: commands.Context):
