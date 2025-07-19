@@ -536,12 +536,17 @@ async def stream_worker(channel: discord.TextChannel):
         customs = await active_custom_filters()
 
         # ----------  (#2) ultra‑cheap global short‑circuit ---------------- #
-        user_whitelist = {u for _, f in customs for u in f.user_include}
-        page_regexes   = [f.page_include for _, f in customs if f.page_include]
-        title          = change.get("title", "")
+        user_whitelist  = {u for _, f in customs for u in f.user_include}
+        page_regexes    = [f.page_include for _, f in customs if f.page_include]
+        summary_regexes = [f.sum_include for _, f in customs if f.sum_include]
 
-        if change["user"] not in user_whitelist and not any(
-            rx.search(title) for rx in page_regexes
+        title   = change.get("title", "")
+        comment = change.get("log_action_comment") or change.get("comment") or ""
+
+        if (
+            change["user"] not in user_whitelist
+            and not any(rx.search(title)   for rx in page_regexes)
+            and not any(rx.search(comment) for rx in summary_regexes)
         ):
             queue.task_done()
             continue  # fast reject before any regex‑heavy work
