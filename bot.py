@@ -5,32 +5,31 @@ fez_collector — Discord edition
 * Monitors MediaWiki EventStreams and posts changes to Discord.
 * Reads **and** persists state (config) to a JSON file whose location is
   supplied in the `FEZ_COLLECTOR_STATE` environment variable.
-* Lets authorised users update the config live from Discord commands.
+* Lets authorised users update the config live from Discord **slash**
+  commands ( `/…` ).  Legacy **bang** prefixes (`!…`) are retained for
+  backward compatibility.
 
 **Environment Variables:**
 * `FEZ_COLLECTOR_DISCORD_TOKEN` - Discord bot token (required)
-* `FEZ_COLLECTOR_CHANNEL_ID` - Parent channel ID for threads (required)
-* `FEZ_COLLECTOR_STATE` - Path to config JSON file (default: "./state/config.json")
+* `FEZ_COLLECTOR_CHANNEL_ID`   - Parent channel ID for threads (required)
+* `FEZ_COLLECTOR_STATE`        - Path to config JSON file (default: "./state/config.json")
 
-**Available Commands:**
-* `!ping` - Test bot responsiveness
-* `!add <Username>`          - Create a "User:&lt;Username&gt;" custom thread **and** add the user to `userIncludeList`
-* `!addcustom <threadname>`  - Create a generic custom‑filter thread (parent channel only)
-* `!showconfig`              - Display current configuration
-* `!activate` / `!deactivate` - Toggle current custom thread on/off (inside the thread)
-* `!activate` - Activate current custom thread (custom thread only)
-* `!deactivate` - Deactivate current custom thread (custom thread only)
-* `!config get` - Show current thread configuration (custom thread only)
-* `!config set <key> <json>` - Set configuration value (custom thread only)
-* `!config add <key> <value>` - Add to list configuration (custom thread only)
-* `!config remove <key> <value>` - Remove from list configuration (custom thread only)
-* `!config clear <key>` - Clear list configuration (custom thread only)
+**Available Commands (preferred → legacy):**
+* `/ping`  (`!ping`) ‑ Test bot responsiveness
+* `/add <Username>`  (`!add`) ‑ Create a "User:&lt;Username&gt;" thread **and** add the user to `userIncludeList`
+* `/addcustom <name>`  (`!addcustom`) ‑ Create a generic filter thread (parent channel only)
+* `/globalconfig [get]`  (replaces `!showconfig`) ‑ Download full configuration as a JSON attachment
+* `/globalconfig set` ‑ **Replace** the entire configuration from an attached JSON file (**dangerous**)
+* `/activate` / `/deactivate` ‑ Toggle activity for the *current thread*
+* `/config [get]` ‑ Show current thread configuration
+* `/config set <key> <json>` ‑ Set configuration value
+* `/config add|remove|clear …` ‑ Mutate list‑type configuration fields
 
-**Config Schema (v0.7+):**
+**Config Schema (v0.8):**
 
       {
-          "version": "0.7",
-          "custom_threads": {
+          "version": "0.8",
+          "threads": {
               "<thread_id>": {
                   "name": "User:Username",       # display only
                   "active": true,
@@ -46,11 +45,8 @@ fez_collector — Discord edition
               }
           }
       }
-
-  All threads are now custom threads with configurable filters. Per‑user tracking
-  has been retired in favor of unified custom thread routing.
 """
-VERSION = "0.7-discord-harmonised"
+VERSION = "0.8-discord-harmonised"
 print(f"fez_collector {VERSION} initialising…")
 
 import asyncio
@@ -59,7 +55,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-import re
+import re, io
 from re import RegexFlag, compile, search
 from typing import Any, List, Optional, Tuple
 
@@ -108,26 +104,8 @@ DEFAULT_CUSTOM_CONFIG = {
     "summaryExcludePatterns": [],
 }
 
-# Config schema:
-# {
-#   "version": "0.7",
-#   "custom_threads": {
-#       "<thread_id>": {"name": str, "active": bool, "config": {…DEFAULT_CUSTOM_CONFIG…}}
-#   }
-# }
-# Per‑user tracking has been retired (v0.7).  Routing happens exclusively
-# via `custom_threads`.
-DEFAULT_CONFIG = {"version": "0.7", "custom_threads": {}}
-
-
-def _upgrade_config(raw: dict) -> dict:
-    """Cheap in‑memory upgrader; mutates & returns."""
-    # drop obsolete keys in‑place
-    raw.pop("users", None)
-    if "custom_threads" not in raw:
-        raw["custom_threads"] = {}
-    raw["version"] = "0.7"
-    return raw
+# Config schema (see docstring):
+DEFAULT_CONFIG = {"version": "0.8", "threads": {}}
 
 
 def load_config() -> dict:
@@ -137,7 +115,10 @@ def load_config() -> dict:
         return DEFAULT_CONFIG.copy()
     with STATE_FILE.open(encoding="utf-8") as fp:
         raw = json.load(fp)
-    return _upgrade_config(raw)
+    # ensure key exists – older configs will silently keep working,
+    # but we no longer mutate them in‑place.
+    raw.setdefault("threads", {})
+    return raw
 
 
 def save_config(cfg: dict) -> None:
@@ -192,21 +173,21 @@ async def ensure_custom_thread_entry(thread: discord.Thread, *, create_if_missin
     # Every thread (incl. "User:" ones) is now a first‑class custom thread.
 
     async with CONFIG_LOCK:
-        entry = CONFIG["custom_threads"].get(tid)
+        entry = CONFIG["threads"].get(tid)
         if entry is None and create_if_missing:
             entry = {
                 "name": thread.name,
                 "active": True,
                 "config": _blank_custom_cfg(),
             }
-            CONFIG["custom_threads"][tid] = entry
+            CONFIG["threads"][tid] = entry
             save_config(CONFIG)
         return entry
 
 
 async def set_custom_thread_active(thread_id: int, active: bool) -> bool:
     async with CONFIG_LOCK:
-        entry = CONFIG["custom_threads"].get(str(thread_id))
+        entry = CONFIG["threads"].get(str(thread_id))
         if not entry:
             return False
         entry["active"] = active
@@ -216,7 +197,7 @@ async def set_custom_thread_active(thread_id: int, active: bool) -> bool:
 
 async def update_custom_thread_config(thread_id: int, new_cfg: dict) -> bool:
     async with CONFIG_LOCK:
-        entry = CONFIG["custom_threads"].get(str(thread_id))
+        entry = CONFIG["threads"].get(str(thread_id))
         if not entry:
             return False
         entry["config"] = new_cfg
@@ -238,7 +219,7 @@ async def mutate_custom_thread_config_list(thread_id: int, key: str, *, add: Opt
     Mutate an array field of a custom thread config. Returns (ok, new_list|None).
     """
     async with CONFIG_LOCK:
-        entry = CONFIG["custom_threads"].get(str(thread_id))
+        entry = CONFIG["threads"].get(str(thread_id))
         if not entry:
             return False, None
         cfg = entry["config"]
@@ -357,7 +338,7 @@ stream = EventStreams(
 # Keep message‑content so legacy “!” commands still work, but the new UX is via “/”.
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)  # prefix kept for BC
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # --------------------------------------------------------------------------- #
 # ── Message formatting                                                        #
@@ -405,7 +386,7 @@ async def stream_worker(channel: discord.TextChannel):
         async with CONFIG_LOCK:
             items = [
                 (int(tid), CustomFilter(entry["config"]))
-                for tid, entry in CONFIG["custom_threads"].items()
+                for tid, entry in CONFIG["threads"].items()
                 if entry.get("active", False)
             ]
         return items
@@ -497,7 +478,7 @@ async def add_cmd(ctx: commands.Context, *, user: str):
     then appends the supplied username to `userIncludeList`.
     """
     if ctx.channel.id != DISCORD_CHANNEL_ID:
-        await ctx.reply("Run `!add` in the parent channel.")
+        await ctx.reply("Run `/add` in the parent channel.")
         return
 
     # create "User:&lt;Username&gt;" thread
@@ -517,15 +498,55 @@ async def add_cmd(ctx: commands.Context, *, user: str):
     await ctx.reply(f"Tracking **{user}** in <#{thread.id}>.\n`userIncludeList`: {new_list}")
 
 
-@bot.hybrid_command(name="showconfig",
-                    description="Display current configuration",
-                    with_app_command=True)
+# --------------------------------------------------------------------------- #
+# ── Global configuration ("/globalconfig …")                                 #
+# --------------------------------------------------------------------------- #
+
+
+@bot.hybrid_group(name="globalconfig",
+                  invoke_without_command=True,
+                  description="Global configuration operations",
+                  with_app_command=True)
 @commands.check(authorised)
-async def showconfig_cmd(ctx: commands.Context):
-    """Dump the current config."""
+async def globalconfig_group(ctx: commands.Context):
+    """`/globalconfig` (no subcommand) ⇒ `/globalconfig get`."""
+    await ctx.invoke(globalconfig_get_cmd)
+
+
+@globalconfig_group.command(name="get",
+                            description="Download full configuration as JSON",
+                            with_app_command=True)
+@commands.check(authorised)
+async def globalconfig_get_cmd(ctx: commands.Context):
     async with CONFIG_LOCK:
-        pretty = json.dumps(CONFIG, indent=2)
-    await ctx.reply(f"```json\n{pretty}\n```")
+        data = json.dumps(CONFIG, indent=2).encode("utf-8")
+    file = discord.File(io.BytesIO(data), filename="global_config.json")
+    await ctx.reply(file=file, mention_author=False)
+
+
+@globalconfig_group.command(name="set",
+                            description="Replace configuration from attached JSON (DANGEROUS)",
+                            with_app_command=True)
+@commands.check(authorised)
+async def globalconfig_set_cmd(ctx: commands.Context):
+    if not ctx.message.attachments:
+        await ctx.reply("Attach a **JSON** file to `/globalconfig set`.", mention_author=False)
+        return
+    attachment = ctx.message.attachments[0]
+    try:
+        raw = await attachment.read()
+        new_cfg = json.loads(raw)
+    except Exception as e:
+        await ctx.reply(f"Could not parse attachment as JSON: {e}", mention_author=False)
+        return
+    async with CONFIG_LOCK:
+        CONFIG.clear()
+        CONFIG.update(new_cfg)
+        save_config(CONFIG)
+    await ctx.reply("Global configuration **replaced**.", mention_author=False)
+
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -581,12 +602,12 @@ async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
         await ctx.reply(f"Failed to create thread: {e}")
         return
     await ensure_custom_thread_entry(thread, create_if_missing=True)
-    await ctx.reply(f"Custom thread created: <#{thread.id}> (active). Configure with `!config get` inside the thread.")
+    await ctx.reply(f"Thread created: <#{thread.id}> (active). Configure with `/config get` inside the thread.")
 
 
 async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
     if not _in_custom_thread(ctx):
-        await ctx.reply("This command must be used inside a custom thread.")
+        await ctx.reply("This command must be used inside a thread.")
         return None
     entry = await ensure_custom_thread_entry(ctx.channel, create_if_missing=False)
     if entry is None:
@@ -631,7 +652,8 @@ async def deactivate_custom_thread_cmd(ctx: commands.Context):
                   with_app_command=True)
 @commands.check(authorised)
 async def config_group(ctx: commands.Context):
-    await ctx.reply("Subcommands: `get`, `set <key> <json>`, `add <key> <value>`, `remove <key> <value>`, `clear <key>`.")
+    """`/config` (no subcommand) ⇒ `/config get`."""
+    await ctx.invoke(config_get_cmd)
 
 
 @config_group.command(name="get",
