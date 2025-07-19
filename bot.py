@@ -16,7 +16,7 @@ fez_collector - Discord edition
 
 **Available Commands (preferred -> legacy):**
 * `/ping`  (`!ping`) - Test bot responsiveness
-* `/add <Username>`  (`!add`) - Create a "User:&lt;Username&gt;" thread **and** add the user to `userIncludeList`
+* `/add <Username>`  (`!add`) - Create a "User:<Username>" thread **and** add the user to `userIncludeList`
 * `/addcustom <name>`  (`!addcustom`) - Create a generic filter thread (parent channel only)
 * `/globalconfig [get]`  (replaces `!showconfig`) - Download full configuration as a JSON attachment
 * `/globalconfig set` - **Replace** the entire configuration from an attached JSON file (**dangerous**)
@@ -47,10 +47,10 @@ fez_collector - Discord edition
       }
 """
 VERSION = "0.8-discord-harmonised"
-print(f"fez_collector {VERSION} initialising...")
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -66,6 +66,50 @@ from pywikibot import Site
 from pywikibot.comms.eventstreams import EventStreams
 
 # --------------------------------------------------------------------------- #
+# ── Logging setup                                                            #
+# --------------------------------------------------------------------------- #
+
+def setup_logging():
+    """Configure logging with proper formatting and levels."""
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    # Configure logging format
+    log_format = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Set up root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(log_format)
+    root_logger.addHandler(console_handler)
+    
+    # File handler for all logs
+    file_handler = logging.FileHandler(log_dir / "fez_collector.log")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(log_format)
+    root_logger.addHandler(file_handler)
+    
+    # File handler for errors only
+    error_handler = logging.FileHandler(log_dir / "errors.log")
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(log_format)
+    root_logger.addHandler(error_handler)
+    
+    return logging.getLogger(__name__)
+
+# Initialize logging
+logger = setup_logging()
+logger.info(f"fez_collector {VERSION} initialising...")
+
+# --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
 # --------------------------------------------------------------------------- #
 
@@ -75,6 +119,7 @@ STATE_FILE         = Path(os.getenv("FEZ_COLLECTOR_STATE", "./state/config.json"
 STALENESS_SECS     = 2 * 60 * 60  # two hours
 
 if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
+    logger.error("❌  FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
     sys.exit("❌  FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
 
 # --------------------------------------------------------------------------- #
@@ -99,14 +144,17 @@ DEFAULT_CONFIG = {"version": "0.8", "threads": {}}
 
 def load_config() -> dict:
     if not STATE_FILE.exists():
+        logger.info(f"Creating new config file at {STATE_FILE}")
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         save_config(DEFAULT_CONFIG)
         return DEFAULT_CONFIG.copy()
+    logger.debug(f"Loading config from {STATE_FILE}")
     with STATE_FILE.open(encoding="utf-8") as fp:
         raw = json.load(fp)
     # ensure key exists - older configs will silently keep working,
     # but we no longer mutate them in-place.
     raw.setdefault("threads", {})
+    logger.debug(f"Loaded config with {len(raw.get('threads', {}))} threads")
     return raw
 
 
@@ -115,6 +163,7 @@ def save_config(cfg: dict) -> None:
     with tmp.open("w", encoding="utf-8") as fp:
         json.dump(cfg, fp, indent=2, sort_keys=True)
     tmp.replace(STATE_FILE)
+    logger.debug(f"Config saved to {STATE_FILE}")
 
 
 CONFIG = load_config()
@@ -164,6 +213,7 @@ async def ensure_custom_thread_entry(thread: discord.Thread, *, create_if_missin
     async with CONFIG_LOCK:
         entry = CONFIG["threads"].get(tid)
         if entry is None and create_if_missing:
+            logger.info(f"Creating new config entry for thread {thread.name} ({tid})")
             entry = {
                 "name": thread.name,
                 "active": True,
@@ -178,9 +228,12 @@ async def set_custom_thread_active(thread_id: int, active: bool) -> bool:
     async with CONFIG_LOCK:
         entry = CONFIG["threads"].get(str(thread_id))
         if not entry:
+            logger.warning(f"Attempted to set active state for unknown thread {thread_id}")
             return False
+        old_state = entry.get("active", False)
         entry["active"] = active
         save_config(CONFIG)
+        logger.info(f"Thread {thread_id} active state changed: {old_state} -> {active}")
         return True
 
 
@@ -188,9 +241,11 @@ async def update_custom_thread_config(thread_id: int, new_cfg: dict) -> bool:
     async with CONFIG_LOCK:
         entry = CONFIG["threads"].get(str(thread_id))
         if not entry:
+            logger.warning(f"Attempted to update config for unknown thread {thread_id}")
             return False
         entry["config"] = new_cfg
         save_config(CONFIG)
+        logger.info(f"Updated config for thread {thread_id}")
         return True
 
 
@@ -210,20 +265,24 @@ async def mutate_custom_thread_config_list(thread_id: int, key: str, *, add: Opt
     async with CONFIG_LOCK:
         entry = CONFIG["threads"].get(str(thread_id))
         if not entry:
+            logger.warning(f"Attempted to mutate config for unknown thread {thread_id}")
             return False, None
         cfg = entry["config"]
         if key not in cfg:
             # create list field
             cfg[key] = []
         if clear:
+            logger.info(f"Clearing {key} for thread {thread_id}")
             cfg[key] = []
         else:
             lst = list(cfg[key])
             if add:
+                logger.info(f"Adding {add} to {key} for thread {thread_id}")
                 for it in add:
                     if it not in lst:
                         lst.append(it)
             if remove:
+                logger.info(f"Removing {remove} from {key} for thread {thread_id}")
                 lst = [it for it in lst if it not in remove]
             cfg[key] = lst
         save_config(CONFIG)
@@ -368,6 +427,7 @@ async def stream_worker(channel: discord.TextChannel):
     Background task: tail MediaWiki EventStreams and route posts to **active
     custom threads**.  (Per-user routing removed in v0.7.)
     """
+    logger.info("Starting EventStreams worker")
     loop = asyncio.get_running_loop()
 
     async def active_custom_filters() -> List[Tuple[int, CustomFilter]]:
@@ -378,6 +438,7 @@ async def stream_worker(channel: discord.TextChannel):
                 for tid, entry in CONFIG["threads"].items()
                 if entry.get("active", False)
             ]
+        logger.debug(f"Found {len(items)} active custom filters")
         return items
 
     async def get_thread_obj(tid: int) -> Optional[discord.Thread]:
@@ -397,7 +458,7 @@ async def stream_worker(channel: discord.TextChannel):
             # If we cannot determine freshness, treat as *not stale* but log once.
             # To avoid log spam, gate on an attribute.
             if not getattr(stream_worker, "_warned_missing_ts", False):
-                print("⚠️  Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
+                logger.warning("⚠️  Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
                 setattr(stream_worker, "_warned_missing_ts", True)
             stale = False
         else:
@@ -425,7 +486,7 @@ async def stream_worker(channel: discord.TextChannel):
                         if th is not None:
                             targets.append(th)
                 except Exception as e:  # pragma: no cover
-                    print(f"⚠️  custom filter error for {tid}: {e}")
+                    logger.warning(f"⚠️  custom filter error for {tid}: {e}")
 
         if not targets:
             continue  # nothing to do
@@ -435,6 +496,7 @@ async def stream_worker(channel: discord.TextChannel):
             msg = msg[:1990] + "..."
 
         # Send to all targets; fire and forget
+        logger.debug(f"Sending change to {len(targets)} target(s): {[tgt.name for tgt in targets]}")
         for tgt in targets:
             await loop.create_task(tgt.send(msg))
 
@@ -451,6 +513,7 @@ def authorised(ctx) -> bool:
                     description="Test bot responsiveness",
                     with_app_command=True)
 async def ping_cmd(ctx: commands.Context):
+    logger.info(f"Ping command from {ctx.author} in {ctx.channel}")
     await ctx.reply("pong")
 
 
@@ -459,6 +522,7 @@ async def ping_cmd(ctx: commands.Context):
                     with_app_command=True)
 async def help_cmd(ctx: commands.Context):
     """Display available commands and their descriptions."""
+    logger.info(f"Help command from {ctx.author} in {ctx.channel}")
     help_text = """**Available Commands:**
 
 **Basic Commands:**
@@ -509,7 +573,10 @@ async def add_cmd(ctx: commands.Context, *, user: str):
     Convenience wrapper that delegates to the new `/addcustom` logic,
     then appends the supplied username to `userIncludeList`.
     """
+    logger.info(f"Add command from {ctx.author} for user '{user}' in {ctx.channel}")
+    
     if ctx.channel.id != DISCORD_CHANNEL_ID:
+        logger.warning(f"Add command attempted in wrong channel: {ctx.channel.id} (expected {DISCORD_CHANNEL_ID})")
         await ctx.reply("Run `/add` in the parent channel.")
         return
 
@@ -519,7 +586,9 @@ async def add_cmd(ctx: commands.Context, *, user: str):
             name=f"User:{user}",
             type=discord.ChannelType.public_thread
         )
+        logger.info(f"Created thread {thread.name} ({thread.id}) for user {user}")
     except Exception as e:
+        logger.error(f"Failed to create thread for user {user}: {e}")
         await ctx.reply(f"Failed to create thread: {e}")
         return
 
@@ -550,6 +619,7 @@ async def globalconfig_group(ctx: commands.Context):
                             with_app_command=True)
 @commands.check(authorised)
 async def globalconfig_get_cmd(ctx: commands.Context):
+    logger.info(f"Global config get command from {ctx.author}")
     async with CONFIG_LOCK:
         data = json.dumps(CONFIG, indent=2).encode("utf-8")
     file = discord.File(io.BytesIO(data), filename="global_config.json")
@@ -561,20 +631,26 @@ async def globalconfig_get_cmd(ctx: commands.Context):
                             with_app_command=True)
 @commands.check(authorised)
 async def globalconfig_set_cmd(ctx: commands.Context):
+    logger.warning(f"Global config set command from {ctx.author} - DANGEROUS OPERATION")
+    
     if not ctx.message.attachments:
+        logger.warning("Global config set attempted without attachment")
         await ctx.reply("Attach a **JSON** file to `/globalconfig set`.", mention_author=False)
         return
     attachment = ctx.message.attachments[0]
     try:
         raw = await attachment.read()
         new_cfg = json.loads(raw)
+        logger.info(f"Successfully parsed global config from attachment: {len(new_cfg.get('threads', {}))} threads")
     except Exception as e:
+        logger.error(f"Failed to parse global config attachment: {e}")
         await ctx.reply(f"Could not parse attachment as JSON: {e}", mention_author=False)
         return
     async with CONFIG_LOCK:
         CONFIG.clear()
         CONFIG.update(new_cfg)
         save_config(CONFIG)
+    logger.info("Global configuration replaced successfully")
     await ctx.reply("Global configuration **replaced**.", mention_author=False)
 
 
@@ -619,10 +695,14 @@ def _deepcopy_cfg(obj: Any) -> Any:
 @commands.check(authorised)
 async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
     """/addcustom <threadname> → create a custom filter thread (in parent channel only)."""
+    logger.info(f"Addcustom command from {ctx.author} for thread '{threadname}' in {ctx.channel}")
+    
     if not _in_parent_channel(ctx):
+        logger.warning(f"Addcustom command attempted in wrong channel: {ctx.channel.id}")
         await ctx.reply("Use `/addcustom` in the parent channel.")
         return
     if not threadname.strip():
+        logger.warning("Addcustom command attempted without thread name")
         await ctx.reply("Please provide a thread name: `/addcustom <name>`.")
         return
     try:
@@ -630,7 +710,9 @@ async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
             name=threadname,
             type=discord.ChannelType.public_thread
         )
+        logger.info(f"Created custom thread {thread.name} ({thread.id})")
     except Exception as e:  # pragma: no cover
+        logger.error(f"Failed to create custom thread '{threadname}': {e}")
         await ctx.reply(f"Failed to create thread: {e}")
         return
     await ensure_custom_thread_entry(thread, create_if_missing=True)
@@ -653,6 +735,7 @@ async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
                     with_app_command=True)
 @commands.check(authorised)
 async def activate_custom_thread_cmd(ctx: commands.Context):
+    logger.info(f"Activate command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -660,6 +743,7 @@ async def activate_custom_thread_cmd(ctx: commands.Context):
     if ok:
         await ctx.reply("Activated.")
     else:
+        logger.error(f"Failed to activate thread {ctx.channel.id}")
         await ctx.reply("Failed to activate (missing config?).")
 
 
@@ -668,6 +752,7 @@ async def activate_custom_thread_cmd(ctx: commands.Context):
                     with_app_command=True)
 @commands.check(authorised)
 async def deactivate_custom_thread_cmd(ctx: commands.Context):
+    logger.info(f"Deactivate command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -675,6 +760,7 @@ async def deactivate_custom_thread_cmd(ctx: commands.Context):
     if ok:
         await ctx.reply("Deactivated.")
     else:
+        logger.error(f"Failed to deactivate thread {ctx.channel.id}")
         await ctx.reply("Failed to deactivate (missing config?).")
 
 
@@ -693,6 +779,7 @@ async def config_group(ctx: commands.Context):
                       with_app_command=True)
 @commands.check(authorised)
 async def config_get_cmd(ctx: commands.Context):
+    logger.info(f"Config get command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -705,6 +792,7 @@ async def config_get_cmd(ctx: commands.Context):
                       with_app_command=True)
 @commands.check(authorised)
 async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
+    logger.info(f"Config set command from {ctx.author} in thread {ctx.channel.id}: {key} = {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -716,6 +804,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     if ok:
         await ctx.reply(f"Set `{key}`: `{parsed}`")
     else:
+        logger.error(f"Failed to set config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to set.")
 
 
@@ -724,6 +813,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
                       with_app_command=True)
 @commands.check(authorised)
 async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
+    logger.info(f"Config add command from {ctx.author} in thread {ctx.channel.id}: {key} += {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -732,6 +822,7 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
     if ok:
         await ctx.reply(f"Added to `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
+        logger.error(f"Failed to add to config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to add.")
 
 
@@ -740,6 +831,7 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
                       with_app_command=True)
 @commands.check(authorised)
 async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
+    logger.info(f"Config remove command from {ctx.author} in thread {ctx.channel.id}: {key} -= {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -748,6 +840,7 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
     if ok:
         await ctx.reply(f"Removed from `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
+        logger.error(f"Failed to remove from config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to remove.")
 
 
@@ -756,6 +849,7 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
                       with_app_command=True)
 @commands.check(authorised)
 async def config_clear_cmd(ctx: commands.Context, key: str):
+    logger.info(f"Config clear command from {ctx.author} in thread {ctx.channel.id}: clear {key}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -763,6 +857,7 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
     if ok:
         await ctx.reply(f"Cleared `{key}`.")
     else:
+        logger.error(f"Failed to clear config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to clear.")
 
 
@@ -773,14 +868,29 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
 # --------------------------------------------------------------------------- #
 
 @bot.event
+async def on_error(event, *args, **kwargs):
+    """Log any errors that occur in Discord events."""
+    logger.error(f"Error in event {event}: {args} {kwargs}")
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Log command errors."""
+    if isinstance(error, commands.CheckFailure):
+        logger.warning(f"Unauthorized command attempt by {ctx.author} in {ctx.channel}: {ctx.message.content}")
+    elif isinstance(error, commands.CommandNotFound):
+        logger.debug(f"Unknown command by {ctx.author}: {ctx.message.content}")
+    else:
+        logger.error(f"Command error from {ctx.author} in {ctx.channel}: {error}")
+
+@bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (id {bot.user.id})")
+    logger.info(f"Logged in as {bot.user} (id {bot.user.id})")
     # Register (or update) global application commands with Discord.
     try:
         synced = await bot.tree.sync()
-        print(f"✅  Synced {len(synced)} application command(s)")
+        logger.info(f"✅  Synced {len(synced)} application command(s)")
     except Exception as e:
-        print(f"⚠️  Failed to sync application commands: {e}")
+        logger.warning(f"⚠️  Failed to sync application commands: {e}")
 
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
     # Preload custom thread entries for existing threads (best effort)
@@ -789,16 +899,24 @@ async def on_ready():
         pass
 
     if channel is None:
+        logger.error(f"❌  Could not find channel ID {DISCORD_CHANNEL_ID}")
         sys.exit(f"❌  Could not find channel ID {DISCORD_CHANNEL_ID}")
+    logger.info(f"Found target channel: {channel.name} ({channel.id})")
     # Kick off the background EventStreams task
     bot.loop.create_task(stream_worker(channel))
 
 
 def main():
     try:
+        logger.info("Starting Discord bot...")
         bot.run(DISCORD_TOKEN)
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal, shutting down...")
+    except Exception as e:
+        logger.error(f"Unexpected error in main: {e}")
+        raise
     finally:
-        print("Bye!")
+        logger.info("Bot shutdown complete")
 
 
 if __name__ == "__main__":

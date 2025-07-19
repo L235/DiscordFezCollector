@@ -1,3 +1,7 @@
+# Logs
+logs/
+*.log
+
 # Python
 __pycache__/
 *.py[cod]
@@ -35,25 +39,14 @@ venv.bak/
 .env.test.local
 .env.production.local
 
-# Logs
-*.log
-bot.log
-logs/
-
-# State and runtime files
-state/
-throttle.ctrl
-*.tmp
-*.temp
-
-# IDE and editor files
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS generated files
+# OS
 .DS_Store
 .DS_Store?
 ._*
@@ -61,6 +54,10 @@ throttle.ctrl
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# State files
+state/
+*.tmp
 
 # Discord bot specific
 config.json
