@@ -371,7 +371,7 @@ site = Site()  # default site; EventStreams ignores this for global streams
 # avoids URL‑encoding issues.
 # -------------------------------------------------------------------- #
 
-_NOW_UTC_ISO = datetime.utcnow().replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+_NOW_UTC_ISO = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 stream = EventStreams(
     streams=["recentchange", "revision-create"],
@@ -846,9 +846,6 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
     else:
         logger.error(f"Failed to clear config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to clear.")
-
-
-# (legacy per-user thread helpers deleted)
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
