@@ -509,25 +509,19 @@ def authorised(ctx) -> bool:
     return ctx.author.guild_permissions.manage_guild or ctx.author.id == bot.owner_id
 
 
-@bot.hybrid_command(name="ping",
-                    description="Test bot responsiveness",
-                    with_app_command=True)
-async def ping_cmd(ctx: commands.Context):
-    logger.info(f"Ping command from {ctx.author} in {ctx.channel}")
-    await ctx.reply("pong")
+
 
 
 @bot.hybrid_command(name="fezhelp",
                     description="Show available commands",
                     with_app_command=True)
-async def help_cmd(ctx: commands.Context):
+async def fezhelp_cmd(ctx: commands.Context):
     """Display available commands and their descriptions."""
     logger.info(f"Help command from {ctx.author} in {ctx.channel}")
     help_text = """**Available Commands:**
 
 **Basic Commands:**
-• `/ping` - Test bot responsiveness
-• `/help` - Show this help message
+• `/fezhelp` - Show this help message
 
 **Thread Management:**
 • `/add <Username>` - Create a "User:Username" thread and add the user to `userIncludeList`
@@ -556,7 +550,7 @@ async def help_cmd(ctx: commands.Context):
 • `summaryExcludePatterns` - Summary patterns to exclude
 
 **Legacy Commands (still work):**
-• `!ping`, `!add`, `!addcustom`, `!activate`, `!deactivate`, `!config`"""
+• `!add`, `!addcustom`, `!activate`, `!deactivate`, `!config`"""
     
     await ctx.reply(help_text)
 
@@ -615,8 +609,7 @@ async def globalconfig_group(ctx: commands.Context):
 
 
 @globalconfig_group.command(name="get",
-                            description="Download full configuration as JSON",
-                            with_app_command=True)
+                            description="Download full configuration as JSON")
 @commands.check(authorised)
 async def globalconfig_get_cmd(ctx: commands.Context):
     logger.info(f"Global config get command from {ctx.author}")
@@ -627,8 +620,7 @@ async def globalconfig_get_cmd(ctx: commands.Context):
 
 
 @globalconfig_group.command(name="set",
-                            description="Replace configuration from attached JSON (DANGEROUS)",
-                            with_app_command=True)
+                            description="Replace configuration from attached JSON (DANGEROUS)")
 @commands.check(authorised)
 async def globalconfig_set_cmd(ctx: commands.Context):
     logger.warning(f"Global config set command from {ctx.author} - DANGEROUS OPERATION")
@@ -775,8 +767,7 @@ async def config_group(ctx: commands.Context):
 
 
 @config_group.command(name="get",
-                      description="Show current thread configuration",
-                      with_app_command=True)
+                      description="Show current thread configuration")
 @commands.check(authorised)
 async def config_get_cmd(ctx: commands.Context):
     logger.info(f"Config get command from {ctx.author} in thread {ctx.channel.id}")
@@ -788,8 +779,7 @@ async def config_get_cmd(ctx: commands.Context):
 
 
 @config_group.command(name="set",
-                      description="Set a configuration key",
-                      with_app_command=True)
+                      description="Set a configuration key")
 @commands.check(authorised)
 async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     logger.info(f"Config set command from {ctx.author} in thread {ctx.channel.id}: {key} = {value}")
@@ -809,8 +799,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
 
 
 @config_group.command(name="add",
-                      description="Append value(s) to a list key",
-                      with_app_command=True)
+                      description="Append value(s) to a list key")
 @commands.check(authorised)
 async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
     logger.info(f"Config add command from {ctx.author} in thread {ctx.channel.id}: {key} += {value}")
@@ -827,8 +816,7 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
 
 
 @config_group.command(name="remove",
-                      description="Remove value(s) from a list key",
-                      with_app_command=True)
+                      description="Remove value(s) from a list key")
 @commands.check(authorised)
 async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
     logger.info(f"Config remove command from {ctx.author} in thread {ctx.channel.id}: {key} -= {value}")
@@ -845,8 +833,7 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
 
 
 @config_group.command(name="clear",
-                      description="Clear a list key",
-                      with_app_command=True)
+                      description="Clear a list key")
 @commands.check(authorised)
 async def config_clear_cmd(ctx: commands.Context, key: str):
     logger.info(f"Config clear command from {ctx.author} in thread {ctx.channel.id}: clear {key}")
