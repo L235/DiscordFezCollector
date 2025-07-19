@@ -49,15 +49,17 @@ fez_collector - Discord edition
 VERSION = "0.8-discord-harmonised"
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import re, io
 from re import RegexFlag, compile, search
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
@@ -154,7 +156,8 @@ def load_config() -> dict:
     # ensure key exists - older configs will silently keep working,
     # but we no longer mutate them in-place.
     raw.setdefault("threads", {})
-    logger.debug(f"Loaded config with {len(raw.get('threads', {}))} threads")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Loaded config with %d threads", len(raw.get("threads", {})))
     return raw
 
 
@@ -380,6 +383,19 @@ stream = EventStreams(
 # (no register_filter)
 
 # --------------------------------------------------------------------------- #
+# ── Caches                                                                   #
+# --------------------------------------------------------------------------- #
+
+#  thread_id → (fingerprint, CustomFilter)
+FILTER_CACHE: Dict[int, Tuple[str, "CustomFilter"]] = {}
+#  thread_id → discord.Thread
+THREAD_CACHE: Dict[int, discord.Thread] = {}
+
+def _fingerprint(cfg: dict) -> str:
+    """Deterministic (& cheap) fingerprint for a config dict."""
+    return json.dumps(cfg, sort_keys=True)
+
+# --------------------------------------------------------------------------- #
 # ── Discord bot setup                                                        #
 # --------------------------------------------------------------------------- #
 
@@ -430,27 +446,65 @@ async def stream_worker(channel: discord.TextChannel):
     logger.info("Starting EventStreams worker")
     loop = asyncio.get_running_loop()
 
-    async def active_custom_filters() -> List[Tuple[int, CustomFilter]]:
-        """Return list of (thread_id, CustomFilter) for active custom threads."""
+    async def active_custom_filters() -> List[Tuple[int, "CustomFilter"]]:
+        """
+        Return list of (thread_id, CustomFilter) for **active** custom threads,
+        rebuilding a filter only if its config actually changed.
+        """
         async with CONFIG_LOCK:
-            items = [
-                (int(tid), CustomFilter(entry["config"]))
-                for tid, entry in CONFIG["threads"].items()
-                if entry.get("active", False)
-            ]
-        logger.debug(f"Found {len(items)} active custom filters")
-        return items
+            snapshot = list(CONFIG["threads"].items())
+
+        out: List[Tuple[int, "CustomFilter"]] = []
+        for tid_str, entry in snapshot:
+            if not entry.get("active", False):
+                FILTER_CACHE.pop(int(tid_str), None)
+                continue
+            tid        = int(tid_str)
+            fp         = _fingerprint(entry["config"])
+            cached     = FILTER_CACHE.get(tid)
+            if cached and cached[0] == fp:
+                filt = cached[1]
+            else:
+                filt = CustomFilter(entry["config"])
+                FILTER_CACHE[tid] = (fp, filt)
+            out.append((tid, filt))
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Found %d active custom filters", len(out))
+        return out
 
     async def get_thread_obj(tid: int) -> Optional[discord.Thread]:
+        """Return cached discord.Thread or fetch & cache it."""
+        th = THREAD_CACHE.get(tid)
+        if th is not None:
+            return th
         try:
             ch = await bot.fetch_channel(tid)
+        except (discord.NotFound, discord.Forbidden):
+            THREAD_CACHE.pop(tid, None)
+            return None
         except Exception:
             return None
-        return ch if isinstance(ch, discord.Thread) else None
+        if isinstance(ch, discord.Thread):
+            THREAD_CACHE[tid] = ch
+            return ch
+        return None
 
-    for change in stream:
-        # Let Discord breathe
-        await asyncio.sleep(0)  # cooperative yield
+    # ------------------------------------------------------------------ #
+    # Consume the blocking EventStreams iterator in a thread‑pool so the
+    # asyncio event‑loop never stalls on network reads.  A bounded queue
+    # provides back‑pressure if Discord throttles us.
+    # ------------------------------------------------------------------ #
+    queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=1000)
+
+    def _producer():
+        for evt in stream:
+            asyncio.run_coroutine_threadsafe(queue.put(evt), loop).result()
+
+    loop.run_in_executor(None, _producer)
+
+    while True:
+        change = await queue.get()
 
         # Robust timestamp handling
         ts = _event_ts_to_epoch(change)
@@ -468,9 +522,11 @@ async def stream_worker(channel: discord.TextChannel):
         # Some events may lack user (rare for rc, common for revision-create)
         user = change.get("user")
         if stale:
+            queue.task_done()
             continue
         if not user:
             # Nothing sensible to route; skip quietly.
+            queue.task_done()
             continue
 
         # Determine routing targets
@@ -478,6 +534,23 @@ async def stream_worker(channel: discord.TextChannel):
 
         # Custom threads only
         customs = await active_custom_filters()
+
+        # ----------  (#2) ultra‑cheap global short‑circuit ---------------- #
+        user_whitelist  = {u for _, f in customs for u in f.user_include}
+        page_regexes    = [f.page_include for _, f in customs if f.page_include]
+        summary_regexes = [f.sum_include for _, f in customs if f.sum_include]
+
+        title   = change.get("title", "")
+        comment = change.get("log_action_comment") or change.get("comment") or ""
+
+        if (
+            change["user"] not in user_whitelist
+            and not any(rx.search(title)   for rx in page_regexes)
+            and not any(rx.search(comment) for rx in summary_regexes)
+        ):
+            queue.task_done()
+            continue  # fast reject before any regex‑heavy work
+
         if customs:
             for tid, filt in customs:
                 try:
@@ -489,6 +562,7 @@ async def stream_worker(channel: discord.TextChannel):
                     logger.warning(f"Custom filter error for {tid}: {e}")
 
         if not targets:
+            queue.task_done()
             continue  # nothing to do
 
         msg = format_change(change)
@@ -496,9 +570,15 @@ async def stream_worker(channel: discord.TextChannel):
             msg = msg[:1990] + "..."
 
         # Send to all targets; fire and forget
-        logger.debug(f"Sending change to {len(targets)} target(s): {[tgt.name for tgt in targets]}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Sending change to %d target(s): %s",
+                len(targets),
+                [tgt.name for tgt in targets],
+            )
         for tgt in targets:
             await loop.create_task(tgt.send(msg))
+        queue.task_done()
 
 # --------------------------------------------------------------------------- #
 # ── Discord commands                                                         #
@@ -865,6 +945,18 @@ async def on_command_error(ctx, error):
         logger.debug(f"Unknown command by {ctx.author}: {ctx.message.content}")
     else:
         logger.error(f"Command error from {ctx.author} in {ctx.channel}: {error}")
+
+# ------------------------------------------------------------------------ #
+#  Thread‑cache invalidation                                               #
+# ------------------------------------------------------------------------ #
+
+@bot.event
+async def on_thread_update(before: discord.Thread, after: discord.Thread):
+    THREAD_CACHE[after.id] = after
+
+@bot.event
+async def on_thread_delete(thread: discord.Thread):
+    THREAD_CACHE.pop(thread.id, None)
 
 @bot.event
 async def on_ready():
