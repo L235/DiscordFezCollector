@@ -25,7 +25,7 @@ fez_collector - Discord edition
 * `/config set <key> <json>` - Set configuration value
 * `/config getraw` - Download raw JSON for the current thread
 * `/config setraw` - **Replace** the current thread configuration from an attached JSON file (**dangerous**)
-* `/config add|remove|clear ...` - Mutate list‑type configuration fields
+* `/config add|remove|clear ...` - Mutate list-type configuration fields
 
 **Config Schema (v0.8):**
 
@@ -373,7 +373,7 @@ site = Site()  # default site; EventStreams ignores this for global streams
 # epoch or an ISO-8601 timestamp *without* micro-seconds and without a
 # literal "+" in the TZ designator (the plus would be decoded as
 # whitespace on the server side).  Using "Z" explicitly marks UTC and
-# avoids URL‑encoding issues.
+# avoids URL-encoding issues.
 # -------------------------------------------------------------------- #
 
 _NOW_UTC_ISO = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -493,9 +493,9 @@ async def stream_worker(channel: discord.TextChannel):
         return None
 
     # ------------------------------------------------------------------ #
-    # Consume the blocking EventStreams iterator in a thread‑pool so the
-    # asyncio event‑loop never stalls on network reads.  A bounded queue
-    # provides back‑pressure if Discord throttles us.
+    # Consume the blocking EventStreams iterator in a thread-pool so the
+# asyncio event-loop never stalls on network reads.  A bounded queue
+# provides back-pressure if Discord throttles us.
     # ------------------------------------------------------------------ #
     queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=1000)
 
@@ -537,7 +537,7 @@ async def stream_worker(channel: discord.TextChannel):
         # Custom threads only
         customs = await active_custom_filters()
 
-        # ----------  (#2) ultra‑cheap global short‑circuit ---------------- #
+        # ----------  (#2) ultra-cheap global short-circuit ---------------- #
         user_whitelist  = {u for _, f in customs for u in f.user_include}
         page_regexes    = [f.page_include for _, f in customs if f.page_include]
         summary_regexes = [f.sum_include for _, f in customs if f.sum_include]
@@ -551,7 +551,7 @@ async def stream_worker(channel: discord.TextChannel):
             and not any(rx.search(comment) for rx in summary_regexes)
         ):
             queue.task_done()
-            continue  # fast reject before any regex‑heavy work
+            continue  # fast reject before any regex-heavy work
 
         if customs:
             for tid, filt in customs:
@@ -603,38 +603,38 @@ async def fezhelp_cmd(ctx: commands.Context):
     help_text = """**Available Commands:**
 
 **Basic Commands:**
-• `/fezhelp` - Show this help message
+* `/fezhelp` - Show this help message
 
 **Thread Management:**
-• `/add <Username>` - Create a "User:Username" thread and add the user to `userIncludeList`
-• `/addcustom <name>` - Create a generic filter thread (parent channel only)
-• `/activate` - Activate current thread
-• `/deactivate` - Deactivate current thread
+* `/add <Username>` - Create a "User:Username" thread and add the user to `userIncludeList`
+* `/addcustom <name>` - Create a generic filter thread (parent channel only)
+* `/activate` - Activate current thread
+* `/deactivate` - Deactivate current thread
 
 **Global Configuration:**
-• `/globalconfig getraw` - Download full configuration as JSON
-• `/globalconfig setraw` - Replace configuration from attached JSON file (DANGEROUS)
+* `/globalconfig getraw` - Download full configuration as JSON
+* `/globalconfig setraw` - Replace configuration from attached JSON file (DANGEROUS)
 
 **Thread Configuration:**
-• `/config` - Show current thread configuration
-• `/config getraw` - Download raw JSON for current thread
-• `/config setraw` - Replace current‑thread configuration from attached JSON (DANGEROUS)
-• `/config set <key> <json>` - Set configuration value
-• `/config add <key> <value>` - Add to list configuration
-• `/config remove <key> <value>` - Remove from list configuration
-• `/config clear <key>` - Clear list configuration
+* `/config` - Show current thread configuration
+* `/config getraw` - Download raw JSON for current thread
+* `/config setraw` - Replace current-thread configuration from attached JSON (DANGEROUS)
+* `/config set <key> <json>` - Set configuration value
+* `/config add <key> <value>` - Add to list configuration
+* `/config remove <key> <value>` - Remove from list configuration
+* `/config clear <key>` - Clear list configuration
 
 **Configuration Keys:**
-• `siteName` - Filter by site (e.g., "en.wikipedia.org")
-• `pageIncludePatterns` - Pages to include (regex patterns)
-• `pageExcludePatterns` - Pages to exclude (regex patterns)
-• `userIncludeList` - Users to include
-• `userExcludeList` - Users to exclude
-• `summaryIncludePatterns` - Summary patterns to include
-• `summaryExcludePatterns` - Summary patterns to exclude
+* `siteName` - Filter by site (e.g., "en.wikipedia.org")
+* `pageIncludePatterns` - Pages to include (regex patterns)
+* `pageExcludePatterns` - Pages to exclude (regex patterns)
+* `userIncludeList` - Users to include
+* `userExcludeList` - Users to exclude
+* `summaryIncludePatterns` - Summary patterns to include
+* `summaryExcludePatterns` - Summary patterns to exclude
 
 **Legacy Commands (still work):**
-• `!add`, `!addcustom`, `!activate`, `!deactivate`, `!config`"""
+* `!add`, `!addcustom`, `!activate`, `!deactivate`, `!config`"""
     
     await ctx.reply(help_text)
 
@@ -1004,7 +1004,7 @@ async def on_command_error(ctx, error):
         logger.error(f"Command error from {ctx.author} in {ctx.channel}: {error}")
 
 # ------------------------------------------------------------------------ #
-#  Thread‑cache invalidation                                               #
+#  Thread-cache invalidation                                               #
 # ------------------------------------------------------------------------ #
 
 @bot.event
