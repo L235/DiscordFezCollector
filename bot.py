@@ -324,7 +324,7 @@ stream = EventStreams(
 # ── Discord bot setup                                                        #
 # --------------------------------------------------------------------------- #
 
-# Keep message‑content so legacy “!” commands still work, but the new UX is via “/”.
+# Use "!" *and* register slash commands; documentation promotes "/".
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
