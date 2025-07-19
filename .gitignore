@@ -58,6 +58,7 @@ Thumbs.db
 # State files
 state/
 *.tmp
+throttle.ctrl
 
 # Discord bot specific
 config.json
