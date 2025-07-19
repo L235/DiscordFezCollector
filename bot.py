@@ -61,16 +61,9 @@ from typing import Any, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
-from discord import app_commands           # <-- new (optional in this patch)
+
 from pywikibot import Site
 from pywikibot.comms.eventstreams import EventStreams
-
-# --------------------------------------------------------------------------- #
-# ── Utilities                                                                #
-# --------------------------------------------------------------------------- #
-
-
-
 
 # --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
@@ -88,11 +81,7 @@ if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
 # ── Config management                                                        #
 # --------------------------------------------------------------------------- #
 
-#
-# NOTE: Backward compatibility: old configs lacking "custom_threads" or "version"
-# will be upgraded in memory on load and then saved back automatically on next
-# write. Breaking changes acceptable per user instruction.
-#
+
 
 DEFAULT_CUSTOM_CONFIG = {
     "siteName": "",
