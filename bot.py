@@ -14,10 +14,10 @@ fez_collector — Discord edition
 
 **Available Commands:**
 * `!ping` - Test bot responsiveness
-* `!add <Username>` - Start tracking a user (creates dedicated thread)
-* `!remove <Username>` - Stop tracking a user (thread retained)
-* `!showconfig` - Display current configuration
-* `!create <threadname>` - Create a custom filter thread (parent channel only)
+* `!add <Username>`          - Create a "User:&lt;Username&gt;" custom thread **and** add the user to `userIncludeList`
+* `!addcustom <threadname>`  - Create a generic custom‑filter thread (parent channel only)
+* `!showconfig`              - Display current configuration
+* `!activate` / `!deactivate` - Toggle current custom thread on/off (inside the thread)
 * `!activate` - Activate current custom thread (custom thread only)
 * `!deactivate` - Deactivate current custom thread (custom thread only)
 * `!config get` - Show current thread configuration (custom thread only)
@@ -26,31 +26,20 @@ fez_collector — Discord edition
 * `!config remove <key> <value>` - Remove from list configuration (custom thread only)
 * `!config clear <key>` - Clear list configuration (custom thread only)
 
-**Config Schema (per‑user threads):**
+**Config Schema (v0.7+):**
 
       {
-          "users": {
-              "Username": {
-                  "included": true,
-                  "thread_id": 123456789012345678
-              }
-          }
-      }
-
-  **Custom threads** (new, v0.6+):
-
-      {
-          "users": {...},
+          "version": "0.7",
           "custom_threads": {
               "<thread_id>": {
-                  "name": "Sock stuff",          # display only
+                  "name": "User:Username",       # display only
                   "active": true,
                   "config": {
                       "siteName": "",            # '' => any; e.g. "en.wikipedia.org"
                       "pageIncludePatterns": [],
                       "pageExcludePatterns": [],
                       "userExcludeList": [],
-                      "userIncludeList": [],
+                      "userIncludeList": ["Username"],
                       "summaryIncludePatterns": [],
                       "summaryExcludePatterns": []
                   }
@@ -58,11 +47,10 @@ fez_collector — Discord edition
           }
       }
 
-  When a user is *included*, a dedicated thread is (lazily) created in the
-  configured parent channel and its ID recorded. Unincluding a user preserves
-  the thread mapping for later reuse.
+  All threads are now custom threads with configurable filters. Per‑user tracking
+  has been retired in favor of unified custom thread routing.
 """
-VERSION = "0.6-discord-custom"
+VERSION = "0.7-discord-harmonised"
 print(f"fez_collector {VERSION} initialising…")
 
 import asyncio
@@ -85,8 +73,8 @@ from pywikibot.comms.eventstreams import EventStreams
 # ── Utilities                                                                #
 # --------------------------------------------------------------------------- #
 
+# (reserved‑thread naming now irrelevant – kept only for backwards compat)
 def _is_user_thread_name(name: str) -> bool:
-    """Detect our auto user threads (prefix 'User:' case‑insensitive)."""
     return name.lower().startswith("user:")
 
 
@@ -124,24 +112,23 @@ DEFAULT_CUSTOM_CONFIG = {
 
 # Config schema:
 # {
-#   "version": "0.6",
-#   "users": {...},
+#   "version": "0.7",
 #   "custom_threads": {
 #       "<thread_id>": {"name": str, "active": bool, "config": {…DEFAULT_CUSTOM_CONFIG…}}
 #   }
 # }
-DEFAULT_CONFIG = {"version": "0.6", "users": {}, "custom_threads": {}}
+# Per‑user tracking has been retired (v0.7).  Routing happens exclusively
+# via `custom_threads`.
+DEFAULT_CONFIG = {"version": "0.7", "custom_threads": {}}
 
 
 def _upgrade_config(raw: dict) -> dict:
     """Cheap in‑memory upgrader; mutates & returns."""
-    if "version" not in raw:
-        raw["version"] = "0.5"
-    if "users" not in raw:
-        raw["users"] = {}
+    # drop obsolete keys in‑place
+    raw.pop("users", None)
     if "custom_threads" not in raw:
         raw["custom_threads"] = {}
-    # nothing else (we are permissive wrt missing keys in nested configs)
+    raw["version"] = "0.7"
     return raw
 
 
@@ -209,9 +196,7 @@ async def ensure_custom_thread_entry(thread: discord.Thread, *, create_if_missin
     Ensure CONFIG entry exists for given discord.Thread. Returns entry (dict) or None.
     """
     tid = str(thread.id)
-    # Do NOT create custom entries for user threads.
-    if _is_user_thread_name(thread.name):
-        return None
+    # Every thread (incl. "User:" ones) is now a first‑class custom thread.
 
     async with CONFIG_LOCK:
         entry = CONFIG["custom_threads"].get(tid)
@@ -416,19 +401,11 @@ def format_change(change: dict) -> str:
 # --------------------------------------------------------------------------- #
 
 async def stream_worker(channel: discord.TextChannel):
-    """Background task: tail MediaWiki EventStreams and route posts to threads."""
+    """
+    Background task: tail MediaWiki EventStreams and route posts to **active
+    custom threads**.  (Per‑user routing removed in v0.7.)
+    """
     loop = asyncio.get_running_loop()
-
-    async def get_user_thread(user: str) -> discord.abc.Messageable:
-        """Get the thread for a user, falling back to parent if thread doesn't exist."""
-        thread = await ensure_user_thread(user, parent_channel=channel, create=False)
-        # ensure_user_thread() returns None if user not included; parent channel if thread not found
-        return thread
-
-    async def should_post(user: str) -> bool:
-        async with CONFIG_LOCK:
-            entry = CONFIG["users"].get(user)
-            return bool(entry and entry.get("included", False))
 
     async def active_custom_filters() -> List[Tuple[int, CustomFilter]]:
         """Return list of (thread_id, CustomFilter) for active custom threads."""
@@ -475,18 +452,7 @@ async def stream_worker(channel: discord.TextChannel):
         # Determine routing targets
         targets: List[discord.abc.Messageable] = []
 
-        # User thread?
-        try:
-            if await should_post(user):
-                t = await get_user_thread(user)
-                if t is not None:
-                    targets.append(t)
-        except Exception as e:
-            # Defensive: a corrupt CONFIG entry shouldn't kill the loop.
-            print(f"⚠️  user‑routing error for '{user}': {e}")
-            # continue on to custom filters
-
-        # Custom threads?
+        # Custom threads only
         customs = await active_custom_filters()
         if customs:
             for tid, filt in customs:
@@ -525,62 +491,37 @@ async def ping_cmd(ctx: commands.Context):
     await ctx.reply("pong")
 
 
-async def _set_user_included(ctx, user: str, included: bool):
-    """
-    Mark a user as included/unincluded.
-    When including: eagerly create (or reuse) that user's thread immediately,
-    storing its ID in config. On remove we retain the thread mapping.
-    """
-    async with CONFIG_LOCK:
-        entry = CONFIG["users"].get(user)
-        if entry is None:
-            entry = {"included": included, "thread_id": None}
-            CONFIG["users"][user] = entry
-            action = "created & set"
-        else:
-            prev = entry.get("included", False)
-            if prev == included:
-                await ctx.reply(f"`{user}` already {'added' if included else 'removed'}.")
-                return
-            entry["included"] = included
-            action = "updated"
-        save_config(CONFIG)
 
-    # Eager thread creation when including
-    if included:
-        parent_channel = ctx.guild.get_channel(DISCORD_CHANNEL_ID)
-        if parent_channel is None:
-            parent_channel = await bot.fetch_channel(DISCORD_CHANNEL_ID)
-        thread_chan = await ensure_user_thread(user, parent_channel=parent_channel, create=True)
-        if thread_chan is None:
-            await ctx.reply(f"⚠️  Added `{user}` but user not in config? (race) Saved anyway.")
-            return
-        if thread_chan == parent_channel:
-            await ctx.reply(f"⚠️  Added `{user}`, but could not create/find a thread; will post in parent channel.")
-            return
-        await ctx.reply(f"`{user}` {action} to added. Thread: <#{thread_chan.id}>.")
-        return
-
-    # Removed path
-    await ctx.reply(f"`{user}` {action} to removed (thread retained).")
 
 
 @bot.hybrid_command(name="add",
-                    description="Start tracking a user",
+                    description="Create a per‑user custom thread and include them",
                     with_app_command=True)
 @commands.check(authorised)
 async def add_cmd(ctx: commands.Context, *, user: str):
-    """!add <Username> → start tracking a user (creates/uses dedicated thread)."""
-    await _set_user_included(ctx, user, True)
+    """
+    Convenience wrapper that delegates to the new `!addcustom` logic,
+    then appends the supplied username to `userIncludeList`.
+    """
+    if ctx.channel.id != DISCORD_CHANNEL_ID:
+        await ctx.reply("Run `!add` in the parent channel.")
+        return
 
+    # create "User:&lt;Username&gt;" thread
+    try:
+        thread = await ctx.channel.create_thread(
+            name=f"User:{user}",
+            type=discord.ChannelType.public_thread
+        )
+    except Exception as e:
+        await ctx.reply(f"Failed to create thread: {e}")
+        return
 
-@bot.hybrid_command(name="remove",
-                    description="Stop tracking a user",
-                    with_app_command=True)
-@commands.check(authorised)
-async def remove_cmd(ctx: commands.Context, *, user: str):
-    """!remove <Username> → stop tracking a user (thread retained)."""
-    await _set_user_included(ctx, user, False)
+    await ensure_custom_thread_entry(thread, create_if_missing=True)
+    _, new_list = await mutate_custom_thread_config_list(
+        thread.id, "userIncludeList", add=[user]
+    )
+    await ctx.reply(f"Tracking **{user}** in <#{thread.id}>.\n`userIncludeList`: {new_list}")
 
 
 @bot.hybrid_command(name="showconfig",
@@ -603,15 +544,11 @@ def _in_parent_channel(ctx: commands.Context) -> bool:
 
 
 def _in_custom_thread(ctx: commands.Context) -> bool:
-    """
-    True iff we are in a *custom* thread (thread parent is the configured parent
-    channel AND name does **not** begin with 'User:').
-    """
-    if not isinstance(ctx.channel, discord.Thread):
-        return False
-    if ctx.channel.parent_id != DISCORD_CHANNEL_ID:
-        return False
-    return not _is_user_thread_name(ctx.channel.name)
+    """True when inside *any* thread spawned from the parent channel."""
+    return (
+        isinstance(ctx.channel, discord.Thread)
+        and ctx.channel.parent_id == DISCORD_CHANNEL_ID
+    )
 
 
 def _parse_json_arg(s: str) -> Any:
@@ -630,17 +567,17 @@ def _deepcopy_cfg(obj: Any) -> Any:
         return obj
 
 
-@bot.hybrid_command(name="create",
-                    description="Create a custom-filter thread (parent channel only)",
+@bot.hybrid_command(name="addcustom",
+                    description="Create a custom‑filter thread (parent channel only)",
                     with_app_command=True)
 @commands.check(authorised)
-async def create_custom_thread_cmd(ctx: commands.Context, *, threadname: str = ""):
-    """!create <threadname> → create a custom filter thread (in parent channel only)."""
+async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
+    """!addcustom <threadname> → create a custom filter thread (in parent channel only)."""
     if not _in_parent_channel(ctx):
-        await ctx.reply("Use `!create` in the parent channel.")
+        await ctx.reply("Use `!addcustom` in the parent channel.")
         return
     if not threadname.strip():
-        await ctx.reply("Please provide a thread name: `!create <name>`.")
+        await ctx.reply("Please provide a thread name: `!addcustom <name>`.")
         return
     try:
         thread = await ctx.channel.create_thread(
@@ -782,61 +719,7 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
         await ctx.reply("Failed to clear.")
 
 
-# --------------------------------------------------------------------------- #
-# ── Thread utilities                                                         #
-# --------------------------------------------------------------------------- #
-
-async def ensure_user_thread(
-    user: str,
-    *,
-    parent_channel: discord.TextChannel,
-    create: bool = True
-) -> discord.abc.Messageable | None:
-    """
-    Ensure a thread exists (and is recorded) for `user`.
-
-    Returns:
-      * Thread channel object if user included and thread exists/found.
-      * Parent channel if user included but thread doesn't exist and create=False.
-      * Parent channel if user included but we failed to create/fetch the thread.
-      * None if user is not included (do nothing).
-
-    Thread type: public thread (adjust if you need private).
-    """
-    async with CONFIG_LOCK:
-        entry = CONFIG["users"].get(user)
-        if not entry or not entry.get("included", False):
-            return None
-        thread_id = entry.get("thread_id")
-
-    # Try existing thread
-    if thread_id:
-        try:
-            thread = await bot.fetch_channel(thread_id)
-            if isinstance(thread, discord.Thread):
-                return thread
-        except Exception:
-            thread = None
-
-    # Create a new thread if allowed
-    if create:
-        try:
-            thread = await parent_channel.create_thread(
-                name=f"User:{user}",
-                type=discord.ChannelType.public_thread
-            )
-        except Exception as e:  # pragma: no cover
-            print(f"⚠️  Failed to create thread for {user}: {e}")
-            return parent_channel
-        # Persist ID
-        async with CONFIG_LOCK:
-            CONFIG["users"].setdefault(user, {"included": True, "thread_id": None})
-            CONFIG["users"][user]["thread_id"] = thread.id
-            save_config(CONFIG)
-        return thread
-
-    # No creation requested and no existing thread; fall back to parent
-    return parent_channel
+# (legacy per‑user thread helpers deleted)
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
