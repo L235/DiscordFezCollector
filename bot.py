@@ -18,11 +18,13 @@ fez_collector - Discord edition
 * `/ping`  (`!ping`) - Test bot responsiveness
 * `/add <Username>`  (`!add`) - Create a "User:<Username>" thread **and** add the user to `userIncludeList`
 * `/addcustom <name>`  (`!addcustom`) - Create a generic filter thread (parent channel only)
-* `/globalconfig [get]`  (replaces `!showconfig`) - Download full configuration as a JSON attachment
-* `/globalconfig set` - **Replace** the entire configuration from an attached JSON file (**dangerous**)
+* `/globalconfig getraw`  - Download full configuration as a JSON attachment
+* `/globalconfig setraw` - **Replace** the entire configuration from an attached JSON file (**dangerous**)
 * `/activate` / `/deactivate` - Toggle activity for the *current thread*
 * `/config [get]` - Show current thread configuration
 * `/config set <key> <json>` - Set configuration value
+* `/config getraw` - Download raw JSON for the current thread
+* `/config setraw` - **Replace** the current thread configuration from an attached JSON file (**dangerous**)
 * `/config add|remove|clear ...` - Mutate list‑type configuration fields
 
 **Config Schema (v0.8):**
@@ -610,11 +612,13 @@ async def fezhelp_cmd(ctx: commands.Context):
 • `/deactivate` - Deactivate current thread
 
 **Global Configuration:**
-• `/globalconfig` - Download full configuration as JSON
-• `/globalconfig set` - Replace configuration from attached JSON file (DANGEROUS)
+• `/globalconfig getraw` - Download full configuration as JSON
+• `/globalconfig setraw` - Replace configuration from attached JSON file (DANGEROUS)
 
 **Thread Configuration:**
 • `/config` - Show current thread configuration
+• `/config getraw` - Download raw JSON for current thread
+• `/config setraw` - Replace current‑thread configuration from attached JSON (DANGEROUS)
 • `/config set <key> <json>` - Set configuration value
 • `/config add <key> <value>` - Add to list configuration
 • `/config remove <key> <value>` - Remove from list configuration
@@ -684,30 +688,30 @@ async def add_cmd(ctx: commands.Context, *, user: str):
                   with_app_command=True)
 @commands.check(authorised)
 async def globalconfig_group(ctx: commands.Context):
-    """`/globalconfig` (no subcommand) -> `/globalconfig get`."""
-    await ctx.invoke(globalconfig_get_cmd)
+    """`/globalconfig` (no subcommand) -> `/globalconfig getraw`."""
+    await ctx.invoke(globalconfig_getraw_cmd)
 
 
-@globalconfig_group.command(name="get",
+@globalconfig_group.command(name="getraw",
                             description="Download full configuration as JSON")
 @commands.check(authorised)
-async def globalconfig_get_cmd(ctx: commands.Context):
-    logger.info(f"Global config get command from {ctx.author}")
+async def globalconfig_getraw_cmd(ctx: commands.Context):  # noqa: N802
+    logger.info(f"Global config getraw command from {ctx.author}")
     async with CONFIG_LOCK:
         data = json.dumps(CONFIG, indent=2).encode("utf-8")
     file = discord.File(io.BytesIO(data), filename="global_config.json")
     await ctx.reply(file=file, mention_author=False)
 
 
-@globalconfig_group.command(name="set",
+@globalconfig_group.command(name="setraw",
                             description="Replace configuration from attached JSON (DANGEROUS)")
 @commands.check(authorised)
-async def globalconfig_set_cmd(ctx: commands.Context):
-    logger.warning(f"Global config set command from {ctx.author} - DANGEROUS OPERATION")
+async def globalconfig_setraw_cmd(ctx: commands.Context):  # noqa: N802
+    logger.warning(f"Global config setraw command from {ctx.author} - DANGEROUS OPERATION")
     
     if not ctx.message.attachments:
-        logger.warning("Global config set attempted without attachment")
-        await ctx.reply("Attach a **JSON** file to `/globalconfig set`.", mention_author=False)
+        logger.warning("Global config setraw attempted without attachment")
+        await ctx.reply("Attach a **JSON** file to `/globalconfig setraw`.", mention_author=False)
         return
     attachment = ctx.message.attachments[0]
     try:
@@ -926,6 +930,59 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
     else:
         logger.error(f"Failed to clear config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to clear.")
+
+
+# --------------------------------------------------------------------------- #
+# ── /config … raw variants (per‑thread)                                     #
+# --------------------------------------------------------------------------- #
+
+
+@config_group.command(name="getraw",
+                      description="Download raw JSON configuration for this thread")
+@commands.check(authorised)
+async def config_getraw_cmd(ctx: commands.Context):
+    logger.info(f"Config getraw command from {ctx.author} in thread {ctx.channel.id}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    data = json.dumps(entry["config"], indent=2).encode("utf-8")
+    file = discord.File(io.BytesIO(data),
+                        filename=f"thread_{ctx.channel.id}_config.json")
+    await ctx.reply(file=file, mention_author=False)
+
+
+@config_group.command(name="setraw",
+                      description="Replace this thread's configuration from attached JSON (DANGEROUS)")
+@commands.check(authorised)
+async def config_setraw_cmd(ctx: commands.Context):
+    logger.warning(f"Config setraw command from {ctx.author} in thread {ctx.channel.id}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+
+    if not ctx.message.attachments:
+        await ctx.reply("Attach a **JSON** file to `/config setraw`.",
+                        mention_author=False)
+        return
+
+    attachment = ctx.message.attachments[0]
+    try:
+        raw = await attachment.read()
+        new_cfg = json.loads(raw)
+        logger.info(f"Parsed thread config for {ctx.channel.id} successfully")
+    except Exception as e:
+        logger.error(f"Failed to parse thread config: {e}")
+        await ctx.reply(f"Could not parse attachment as JSON: {e}",
+                        mention_author=False)
+        return
+
+    ok = await update_custom_thread_config(ctx.channel.id, new_cfg)
+    if ok:
+        await ctx.reply("Thread configuration **replaced**.",
+                        mention_author=False)
+    else:
+        await ctx.reply("Failed to replace configuration.",
+                        mention_author=False)
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
