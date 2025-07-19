@@ -14,7 +14,7 @@ fez_collector - Discord edition
 * `FEZ_COLLECTOR_CHANNEL_ID`   - Parent channel ID for threads (required)
 * `FEZ_COLLECTOR_STATE`        - Path to config JSON file (default: "./state/config.json")
 
-**Available Commands (preferred → legacy):**
+**Available Commands (preferred -> legacy):**
 * `/ping`  (`!ping`) - Test bot responsiveness
 * `/add <Username>`  (`!add`) - Create a "User:&lt;Username&gt;" thread **and** add the user to `userIncludeList`
 * `/addcustom <name>`  (`!addcustom`) - Create a generic filter thread (parent channel only)
@@ -452,6 +452,49 @@ def authorised(ctx) -> bool:
                     with_app_command=True)
 async def ping_cmd(ctx: commands.Context):
     await ctx.reply("pong")
+
+
+@bot.hybrid_command(name="help",
+                    description="Show available commands",
+                    with_app_command=True)
+async def help_cmd(ctx: commands.Context):
+    """Display available commands and their descriptions."""
+    help_text = """**Available Commands:**
+
+**Basic Commands:**
+• `/ping` - Test bot responsiveness
+• `/help` - Show this help message
+
+**Thread Management:**
+• `/add <Username>` - Create a "User:Username" thread and add the user to `userIncludeList`
+• `/addcustom <name>` - Create a generic filter thread (parent channel only)
+• `/activate` - Activate current thread
+• `/deactivate` - Deactivate current thread
+
+**Global Configuration:**
+• `/globalconfig` - Download full configuration as JSON
+• `/globalconfig set` - Replace configuration from attached JSON file (DANGEROUS)
+
+**Thread Configuration:**
+• `/config` - Show current thread configuration
+• `/config set <key> <json>` - Set configuration value
+• `/config add <key> <value>` - Add to list configuration
+• `/config remove <key> <value>` - Remove from list configuration
+• `/config clear <key>` - Clear list configuration
+
+**Configuration Keys:**
+• `siteName` - Filter by site (e.g., "en.wikipedia.org")
+• `pageIncludePatterns` - Pages to include (regex patterns)
+• `pageExcludePatterns` - Pages to exclude (regex patterns)
+• `userIncludeList` - Users to include
+• `userExcludeList` - Users to exclude
+• `summaryIncludePatterns` - Summary patterns to include
+• `summaryExcludePatterns` - Summary patterns to exclude
+
+**Legacy Commands (still work):**
+• `!ping`, `!add`, `!addcustom`, `!activate`, `!deactivate`, `!config`"""
+    
+    await ctx.reply(help_text)
 
 
 
