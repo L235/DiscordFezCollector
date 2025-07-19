@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-fez_collector — Discord edition
+fez_collector - Discord edition
 --------------------------------
 * Monitors MediaWiki EventStreams and posts changes to Discord.
 * Reads **and** persists state (config) to a JSON file whose location is
   supplied in the `FEZ_COLLECTOR_STATE` environment variable.
 * Lets authorised users update the config live from Discord **slash**
-  commands ( `/…` ).  Legacy **bang** prefixes (`!…`) are retained for
+  commands ( `/...` ).  Legacy **bang** prefixes (`!...`) are retained for
   backward compatibility.
 
 **Environment Variables:**
@@ -15,15 +15,15 @@ fez_collector — Discord edition
 * `FEZ_COLLECTOR_STATE`        - Path to config JSON file (default: "./state/config.json")
 
 **Available Commands (preferred → legacy):**
-* `/ping`  (`!ping`) ‑ Test bot responsiveness
-* `/add <Username>`  (`!add`) ‑ Create a "User:&lt;Username&gt;" thread **and** add the user to `userIncludeList`
-* `/addcustom <name>`  (`!addcustom`) ‑ Create a generic filter thread (parent channel only)
-* `/globalconfig [get]`  (replaces `!showconfig`) ‑ Download full configuration as a JSON attachment
-* `/globalconfig set` ‑ **Replace** the entire configuration from an attached JSON file (**dangerous**)
-* `/activate` / `/deactivate` ‑ Toggle activity for the *current thread*
-* `/config [get]` ‑ Show current thread configuration
-* `/config set <key> <json>` ‑ Set configuration value
-* `/config add|remove|clear …` ‑ Mutate list‑type configuration fields
+* `/ping`  (`!ping`) - Test bot responsiveness
+* `/add <Username>`  (`!add`) - Create a "User:&lt;Username&gt;" thread **and** add the user to `userIncludeList`
+* `/addcustom <name>`  (`!addcustom`) - Create a generic filter thread (parent channel only)
+* `/globalconfig [get]`  (replaces `!showconfig`) - Download full configuration as a JSON attachment
+* `/globalconfig set` - **Replace** the entire configuration from an attached JSON file (**dangerous**)
+* `/activate` / `/deactivate` - Toggle activity for the *current thread*
+* `/config [get]` - Show current thread configuration
+* `/config set <key> <json>` - Set configuration value
+* `/config add|remove|clear ...` - Mutate list‑type configuration fields
 
 **Config Schema (v0.8):**
 
@@ -47,7 +47,7 @@ fez_collector — Discord edition
       }
 """
 VERSION = "0.8-discord-harmonised"
-print(f"fez_collector {VERSION} initialising…")
+print(f"fez_collector {VERSION} initialising...")
 
 import asyncio
 import json
@@ -104,8 +104,8 @@ def load_config() -> dict:
         return DEFAULT_CONFIG.copy()
     with STATE_FILE.open(encoding="utf-8") as fp:
         raw = json.load(fp)
-    # ensure key exists – older configs will silently keep working,
-    # but we no longer mutate them in‑place.
+    # ensure key exists - older configs will silently keep working,
+    # but we no longer mutate them in-place.
     raw.setdefault("threads", {})
     return raw
 
@@ -126,7 +126,7 @@ CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
 
 def _event_ts_to_epoch(change: dict) -> Optional[float]:
     """
-    Best‑effort extraction of an event timestamp (UTC seconds).
+    Best-effort extraction of an event timestamp (UTC seconds).
 
     MediaWiki recentchange events *usually* include an integer `timestamp`
     (Unix epoch). Some other stream payloads (or schema bumps / edge cases)
@@ -159,7 +159,7 @@ async def ensure_custom_thread_entry(thread: discord.Thread, *, create_if_missin
     Ensure CONFIG entry exists for given discord.Thread. Returns entry (dict) or None.
     """
     tid = str(thread.id)
-    # Every thread (incl. "User:" ones) is now a first‑class custom thread.
+    # Every thread (incl. "User:" ones) is now a first-class custom thread.
 
     async with CONFIG_LOCK:
         entry = CONFIG["threads"].get(tid)
@@ -232,7 +232,7 @@ async def mutate_custom_thread_config_list(thread_id: int, key: str, *, add: Opt
 
 def _compile_pattern_list(patterns: List[str]) -> Optional[re.Pattern]:
     """
-    Accept list‑ish input; coerce scalars to a single‑element list.
+    Accept list-ish input; coerce scalars to a single-element list.
     """
     if isinstance(patterns, str):
         patterns = [patterns]
@@ -301,12 +301,12 @@ class CustomFilter:
 
 #
 # We no longer restrict to a single wiki; collect everything and filter later.
-# This will include non‑English projects unless custom filters narrow scope.
+# This will include non-English projects unless custom filters narrow scope.
 #
 site = Site()  # default site; EventStreams ignores this for global streams
 # -------------------------------------------------------------------- #
-# EventStreams requires its `since=` parameter to be either a Unix‑ms
-# epoch or an ISO‑8601 timestamp *without* micro‑seconds and without a
+# EventStreams requires its `since=` parameter to be either a Unix-ms
+# epoch or an ISO-8601 timestamp *without* micro-seconds and without a
 # literal "+" in the TZ designator (the plus would be decoded as
 # whitespace on the server side).  Using "Z" explicitly marks UTC and
 # avoids URL‑encoding issues.
@@ -366,7 +366,7 @@ def format_change(change: dict) -> str:
 async def stream_worker(channel: discord.TextChannel):
     """
     Background task: tail MediaWiki EventStreams and route posts to **active
-    custom threads**.  (Per‑user routing removed in v0.7.)
+    custom threads**.  (Per-user routing removed in v0.7.)
     """
     loop = asyncio.get_running_loop()
 
@@ -432,7 +432,7 @@ async def stream_worker(channel: discord.TextChannel):
 
         msg = format_change(change)
         if len(msg) > 2000:  # Discord hard limit
-            msg = msg[:1990] + "…"
+            msg = msg[:1990] + "..."
 
         # Send to all targets; fire and forget
         for tgt in targets:
@@ -458,7 +458,7 @@ async def ping_cmd(ctx: commands.Context):
 
 
 @bot.hybrid_command(name="add",
-                    description="Create a per‑user custom thread and include them",
+                    description="Create a per-user custom thread and include them",
                     with_app_command=True)
 @commands.check(authorised)
 async def add_cmd(ctx: commands.Context, *, user: str):
@@ -488,7 +488,7 @@ async def add_cmd(ctx: commands.Context, *, user: str):
 
 
 # --------------------------------------------------------------------------- #
-# ── Global configuration ("/globalconfig …")                                 #
+# ── Global configuration ("/globalconfig ...")                                 #
 # --------------------------------------------------------------------------- #
 
 
@@ -498,7 +498,7 @@ async def add_cmd(ctx: commands.Context, *, user: str):
                   with_app_command=True)
 @commands.check(authorised)
 async def globalconfig_group(ctx: commands.Context):
-    """`/globalconfig` (no subcommand) ⇒ `/globalconfig get`."""
+    """`/globalconfig` (no subcommand) -> `/globalconfig get`."""
     await ctx.invoke(globalconfig_get_cmd)
 
 
@@ -562,7 +562,7 @@ def _parse_json_arg(s: str) -> Any:
 
 
 def _deepcopy_cfg(obj: Any) -> Any:
-    """Cheap JSON round‑trip copy."""
+    """Cheap JSON round-trip copy."""
     try:
         return json.loads(json.dumps(obj))
     except Exception:
@@ -571,7 +571,7 @@ def _deepcopy_cfg(obj: Any) -> Any:
 
 
 @bot.hybrid_command(name="addcustom",
-                    description="Create a custom‑filter thread (parent channel only)",
+                    description="Create a custom-filter thread (parent channel only)",
                     with_app_command=True)
 @commands.check(authorised)
 async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
@@ -641,7 +641,7 @@ async def deactivate_custom_thread_cmd(ctx: commands.Context):
                   with_app_command=True)
 @commands.check(authorised)
 async def config_group(ctx: commands.Context):
-    """`/config` (no subcommand) ⇒ `/config get`."""
+    """`/config` (no subcommand) -> `/config get`."""
     await ctx.invoke(config_get_cmd)
 
 
@@ -723,7 +723,7 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
         await ctx.reply("Failed to clear.")
 
 
-# (legacy per‑user thread helpers deleted)
+# (legacy per-user thread helpers deleted)
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
