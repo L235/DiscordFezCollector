@@ -463,7 +463,7 @@ async def ping_cmd(ctx: commands.Context):
 @commands.check(authorised)
 async def add_cmd(ctx: commands.Context, *, user: str):
     """
-    Convenience wrapper that delegates to the new `!addcustom` logic,
+    Convenience wrapper that delegates to the new `/addcustom` logic,
     then appends the supplied username to `userIncludeList`.
     """
     if ctx.channel.id != DISCORD_CHANNEL_ID:
@@ -484,7 +484,7 @@ async def add_cmd(ctx: commands.Context, *, user: str):
     _, new_list = await mutate_custom_thread_config_list(
         thread.id, "userIncludeList", add=[user]
     )
-    await ctx.reply(f"Tracking **{user}** in <#{thread.id}>.\n`userIncludeList`: {new_list}")
+    await ctx.reply(f"Tracking **{user}** in <#{thread.id}>.\n`userIncludeList`: `{new_list}`")
 
 
 # --------------------------------------------------------------------------- #
@@ -575,12 +575,12 @@ def _deepcopy_cfg(obj: Any) -> Any:
                     with_app_command=True)
 @commands.check(authorised)
 async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
-    """!addcustom <threadname> → create a custom filter thread (in parent channel only)."""
+    """/addcustom <threadname> → create a custom filter thread (in parent channel only)."""
     if not _in_parent_channel(ctx):
-        await ctx.reply("Use `!addcustom` in the parent channel.")
+        await ctx.reply("Use `/addcustom` in the parent channel.")
         return
     if not threadname.strip():
-        await ctx.reply("Please provide a thread name: `!addcustom <name>`.")
+        await ctx.reply("Please provide a thread name: `/addcustom <name>`.")
         return
     try:
         thread = await ctx.channel.create_thread(
@@ -591,7 +591,7 @@ async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
         await ctx.reply(f"Failed to create thread: {e}")
         return
     await ensure_custom_thread_entry(thread, create_if_missing=True)
-    await ctx.reply(f"Thread created: <#{thread.id}> (active). Configure with `/config get` inside the thread.")
+    await ctx.reply(f"Thread created: <#{thread.id}> (active). Configure with `/config` inside the thread.")
 
 
 async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
@@ -671,7 +671,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     cfg[key] = parsed
     ok = await update_custom_thread_config(ctx.channel.id, cfg)
     if ok:
-        await ctx.reply(f"Set `{key}`.")
+        await ctx.reply(f"Set `{key}`: `{parsed}`")
     else:
         await ctx.reply("Failed to set.")
 
@@ -687,7 +687,7 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
     vals = _normalise_list_val(_parse_json_arg(value))
     ok, new_list = await mutate_custom_thread_config_list(ctx.channel.id, key, add=vals)
     if ok:
-        await ctx.reply(f"Added to `{key}`: {vals}\nNow: {new_list}")
+        await ctx.reply(f"Added to `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
         await ctx.reply("Failed to add.")
 
@@ -703,7 +703,7 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
     vals = _normalise_list_val(_parse_json_arg(value))
     ok, new_list = await mutate_custom_thread_config_list(ctx.channel.id, key, remove=vals)
     if ok:
-        await ctx.reply(f"Removed from `{key}`: {vals}\nNow: {new_list}")
+        await ctx.reply(f"Removed from `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
         await ctx.reply("Failed to remove.")
 
