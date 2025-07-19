@@ -61,7 +61,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 from re import RegexFlag, compile, search
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
@@ -73,9 +73,7 @@ from pywikibot.comms.eventstreams import EventStreams
 # ── Utilities                                                                #
 # --------------------------------------------------------------------------- #
 
-# (reserved‑thread naming now irrelevant – kept only for backwards compat)
-def _is_user_thread_name(name: str) -> bool:
-    return name.lower().startswith("user:")
+
 
 
 # --------------------------------------------------------------------------- #
@@ -184,11 +182,6 @@ def _event_ts_to_epoch(change: dict) -> Optional[float]:
 
 def _blank_custom_cfg() -> dict:
     return json.loads(json.dumps(DEFAULT_CUSTOM_CONFIG))  # deep copy
-
-
-async def get_custom_thread_entry(thread_id: int) -> Optional[dict]:
-    async with CONFIG_LOCK:
-        return CONFIG["custom_threads"].get(str(thread_id))
 
 
 async def ensure_custom_thread_entry(thread: discord.Thread, *, create_if_missing: bool = False) -> Optional[dict]:
