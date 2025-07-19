@@ -119,8 +119,8 @@ STATE_FILE         = Path(os.getenv("FEZ_COLLECTOR_STATE", "./state/config.json"
 STALENESS_SECS     = 2 * 60 * 60  # two hours
 
 if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
-    logger.error("❌  FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
-    sys.exit("❌  FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
+    logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
+    sys.exit("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
 
 # --------------------------------------------------------------------------- #
 # ── Config management                                                        #
@@ -458,7 +458,7 @@ async def stream_worker(channel: discord.TextChannel):
             # If we cannot determine freshness, treat as *not stale* but log once.
             # To avoid log spam, gate on an attribute.
             if not getattr(stream_worker, "_warned_missing_ts", False):
-                logger.warning("⚠️  Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
+                logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
                 setattr(stream_worker, "_warned_missing_ts", True)
             stale = False
         else:
@@ -486,7 +486,7 @@ async def stream_worker(channel: discord.TextChannel):
                         if th is not None:
                             targets.append(th)
                 except Exception as e:  # pragma: no cover
-                    logger.warning(f"⚠️  custom filter error for {tid}: {e}")
+                    logger.warning(f"Custom filter error for {tid}: {e}")
 
         if not targets:
             continue  # nothing to do
@@ -888,9 +888,9 @@ async def on_ready():
     # Register (or update) global application commands with Discord.
     try:
         synced = await bot.tree.sync()
-        logger.info(f"✅  Synced {len(synced)} application command(s)")
+        logger.info(f"Synced {len(synced)} application command(s)")
     except Exception as e:
-        logger.warning(f"⚠️  Failed to sync application commands: {e}")
+        logger.warning(f"Failed to sync application commands: {e}")
 
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
     # Preload custom thread entries for existing threads (best effort)
@@ -899,8 +899,8 @@ async def on_ready():
         pass
 
     if channel is None:
-        logger.error(f"❌  Could not find channel ID {DISCORD_CHANNEL_ID}")
-        sys.exit(f"❌  Could not find channel ID {DISCORD_CHANNEL_ID}")
+        logger.error(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
+        sys.exit(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
     logger.info(f"Found target channel: {channel.name} ({channel.id})")
     # Kick off the background EventStreams task
     bot.loop.create_task(stream_worker(channel))
