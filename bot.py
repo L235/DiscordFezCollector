@@ -509,12 +509,7 @@ def authorised(ctx) -> bool:
     return ctx.author.guild_permissions.manage_guild or ctx.author.id == bot.owner_id
 
 
-@bot.hybrid_command(name="ping",
-                    description="Test bot responsiveness",
-                    with_app_command=True)
-async def ping_cmd(ctx: commands.Context):
-    logger.info(f"Ping command from {ctx.author} in {ctx.channel}")
-    await ctx.reply("pong")
+
 
 
 @bot.hybrid_command(name="fezhelp",
@@ -526,8 +521,7 @@ async def fezhelp_cmd(ctx: commands.Context):
     help_text = """**Available Commands:**
 
 **Basic Commands:**
-• `/ping` - Test bot responsiveness
-• `/help` - Show this help message
+• `/fezhelp` - Show this help message
 
 **Thread Management:**
 • `/add <Username>` - Create a "User:Username" thread and add the user to `userIncludeList`
@@ -556,7 +550,7 @@ async def fezhelp_cmd(ctx: commands.Context):
 • `summaryExcludePatterns` - Summary patterns to exclude
 
 **Legacy Commands (still work):**
-• `!ping`, `!add`, `!addcustom`, `!activate`, `!deactivate`, `!config`"""
+• `!add`, `!addcustom`, `!activate`, `!deactivate`, `!config`"""
     
     await ctx.reply(help_text)
 
