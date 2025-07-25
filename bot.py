@@ -645,7 +645,6 @@ async def fezhelp_cmd(ctx: commands.Context):
 @bot.hybrid_command(name="add",
                     description="Create a per-user custom thread and include them",
                     with_app_command=True)
-@commands.check(authorised)
 async def add_cmd(ctx: commands.Context, *, user: str):
     """
     Convenience wrapper that delegates to the new `/addcustom` logic,
@@ -768,7 +767,6 @@ def _deepcopy_cfg(obj: Any) -> Any:
 @bot.hybrid_command(name="addcustom",
                     description="Create a custom-filter thread (parent channel only)",
                     with_app_command=True)
-@commands.check(authorised)
 async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
     """/addcustom <threadname> → create a custom filter thread (in parent channel only)."""
     logger.info(f"Addcustom command from {ctx.author} for thread '{threadname}' in {ctx.channel}")
@@ -809,7 +807,6 @@ async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
 @bot.hybrid_command(name="activate",
                     description="Activate current custom thread",
                     with_app_command=True)
-@commands.check(authorised)
 async def activate_custom_thread_cmd(ctx: commands.Context):
     logger.info(f"Activate command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
@@ -826,7 +823,6 @@ async def activate_custom_thread_cmd(ctx: commands.Context):
 @bot.hybrid_command(name="deactivate",
                     description="Deactivate current custom thread",
                     with_app_command=True)
-@commands.check(authorised)
 async def deactivate_custom_thread_cmd(ctx: commands.Context):
     logger.info(f"Deactivate command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
@@ -844,7 +840,6 @@ async def deactivate_custom_thread_cmd(ctx: commands.Context):
                   invoke_without_command=True,
                   description="Thread configuration operations",
                   with_app_command=True)
-@commands.check(authorised)
 async def config_group(ctx: commands.Context):
     """`/config` (no subcommand) -> `/config get`."""
     await ctx.invoke(config_get_cmd)
@@ -852,7 +847,6 @@ async def config_group(ctx: commands.Context):
 
 @config_group.command(name="get",
                       description="Show current thread configuration")
-@commands.check(authorised)
 async def config_get_cmd(ctx: commands.Context):
     logger.info(f"Config get command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
@@ -864,7 +858,6 @@ async def config_get_cmd(ctx: commands.Context):
 
 @config_group.command(name="set",
                       description="Set a configuration key")
-@commands.check(authorised)
 async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     logger.info(f"Config set command from {ctx.author} in thread {ctx.channel.id}: {key} = {value}")
     entry = await _require_custom_thread(ctx)
@@ -884,7 +877,6 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
 
 @config_group.command(name="add",
                       description="Append value(s) to a list key")
-@commands.check(authorised)
 async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
     logger.info(f"Config add command from {ctx.author} in thread {ctx.channel.id}: {key} += {value}")
     entry = await _require_custom_thread(ctx)
@@ -901,7 +893,6 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
 
 @config_group.command(name="remove",
                       description="Remove value(s) from a list key")
-@commands.check(authorised)
 async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
     logger.info(f"Config remove command from {ctx.author} in thread {ctx.channel.id}: {key} -= {value}")
     entry = await _require_custom_thread(ctx)
@@ -918,7 +909,6 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
 
 @config_group.command(name="clear",
                       description="Clear a list key")
-@commands.check(authorised)
 async def config_clear_cmd(ctx: commands.Context, key: str):
     logger.info(f"Config clear command from {ctx.author} in thread {ctx.channel.id}: clear {key}")
     entry = await _require_custom_thread(ctx)
