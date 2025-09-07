@@ -12,6 +12,7 @@ fez_collector - Discord edition
 **Environment Variables:**
 * `FEZ_COLLECTOR_DISCORD_TOKEN` - Discord bot token (required)
 * `FEZ_COLLECTOR_CHANNEL_ID`   - Parent channel ID for threads (required)
+* `USER_AGENT`                 - (optional) UA for Wikimedia requests. Default: "DiscordFezCollector/1.0 (https://github.com/L235/DiscordFezCollector; User:L235)"
 * `FEZ_COLLECTOR_STATE`        - Path to config JSON file (default: "./state/config.json")
 
 **Available Commands (preferred -> legacy):**
@@ -53,6 +54,7 @@ VERSION = "0.8-discord-harmonised"
 import asyncio
 import concurrent.futures
 import json
+import requests
 import logging
 import os
 import sys
@@ -67,6 +69,7 @@ import discord
 from discord.ext import commands
 
 from pywikibot import Site
+from pywikibot import config as pwb_config
 from pywikibot.comms.eventstreams import EventStreams
 
 # --------------------------------------------------------------------------- #
@@ -121,6 +124,10 @@ DISCORD_TOKEN      = os.getenv("FEZ_COLLECTOR_DISCORD_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("FEZ_COLLECTOR_CHANNEL_ID", "0"))  # numeric
 STATE_FILE         = Path(os.getenv("FEZ_COLLECTOR_STATE", "./state/config.json"))
 STALENESS_SECS     = 2 * 60 * 60  # two hours
+USER_AGENT         = os.getenv(
+    "USER_AGENT",
+    "DiscordFezCollector/1.0 (https://github.com/L235/DiscordFezCollector; User:L235)"
+)
 
 if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
     logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
@@ -369,6 +376,10 @@ class CustomFilter:
 #
 site = Site()  # default site; EventStreams ignores this for global streams
 # -------------------------------------------------------------------- #
+# Set a descriptive Pywikibot UA.
+pwb_config.user_agent_description = USER_AGENT
+
+# -------------------------------------------------------------------- #
 # EventStreams requires its `since=` parameter to be either a Unix-ms
 # epoch or an ISO-8601 timestamp *without* micro-seconds and without a
 # literal "+" in the TZ designator (the plus would be decoded as
@@ -380,7 +391,9 @@ _NOW_UTC_ISO = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m
 
 stream = EventStreams(
     streams=["recentchange", "revision-create"],
-    since=_NOW_UTC_ISO
+    since=_NOW_UTC_ISO,
+    # Also set UA header for the EventStreams connection.
+    headers={"user-agent": USER_AGENT},
 )
 # (no register_filter)
 
@@ -405,6 +418,8 @@ def _fingerprint(cfg: dict) -> str:
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+# Guard so we start only one worker across reconnects.
+_stream_task: Optional[asyncio.Task] = None
 
 # --------------------------------------------------------------------------- #
 # ── Message formatting                                                        #
@@ -500,8 +515,55 @@ async def stream_worker(channel: discord.TextChannel):
     queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=1000)
 
     def _producer():
-        for evt in stream:
-            asyncio.run_coroutine_threadsafe(queue.put(evt), loop).result()
+        """
+        Blocking producer: iterates EventStreams and enqueues messages.
+        Adds simple exponential backoff on errors and logs 403 bodies.
+        """
+        backoff = 5           # seconds
+        max_backoff = 300     # cap
+        global stream
+        while True:
+            try:
+                for evt in stream:
+                    backoff = 5  # reset on success
+                    asyncio.run_coroutine_threadsafe(queue.put(evt), loop).result()
+                # Iterator ended unexpectedly; reinit.
+                logger.warning("EventStreams iterator ended; reinitializing")
+                _since = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+                stream = EventStreams(
+                    streams=["recentchange", "revision-create"],
+                    since=_since,
+                    headers={"user-agent": USER_AGENT},
+                )
+            except requests.HTTPError as e:
+                status = getattr(e.response, "status_code", None)
+                body = None
+                try:
+                    if getattr(e, "response", None) is not None:
+                        body = e.response.text
+                except Exception:
+                    body = None
+                if status == 403:
+                    logger.error("EventStreams HTTP 403. Body:\n%s", (body or "(no body)")[:2000])
+                else:
+                    logger.error("EventStreams HTTP error %s. Body:\n%s", status, (body or "(no body)")[:2000])
+                logger.info("Retrying after %ds", backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+                # Reinitialize with fresh since=now
+                try:
+                    _since = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    stream = EventStreams(
+                        streams=["recentchange", "revision-create"],
+                        since=_since,
+                        headers={"user-agent": USER_AGENT},
+                    )
+                except Exception as e2:
+                    logger.exception("Reinit after HTTP error failed: %r", e2)
+            except Exception as e:
+                logger.exception("EventStreams error: %r; retrying in %ds", e, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
     loop.run_in_executor(None, _producer)
 
@@ -1025,8 +1087,13 @@ async def on_ready():
         logger.error(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
         sys.exit(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
     logger.info(f"Found target channel: {channel.name} ({channel.id})")
-    # Kick off the background EventStreams task
-    bot.loop.create_task(stream_worker(channel))
+    # Start the background EventStreams task once.
+    global _stream_task
+    if _stream_task is None or _stream_task.done():
+        logger.info("Starting EventStreams worker task")
+        _stream_task = bot.loop.create_task(stream_worker(channel))
+    else:
+        logger.info("EventStreams worker already running; not starting another one")
 
 
 def main():
