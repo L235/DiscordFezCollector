@@ -2,6 +2,10 @@
 logs/
 *.log
 
+
+# json
+*.json
+
 # Python
 __pycache__/
 *.py[cod]
