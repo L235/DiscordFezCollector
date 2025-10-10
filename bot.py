@@ -55,6 +55,7 @@ import asyncio
 import concurrent.futures
 import json
 import requests
+import signal
 import logging
 import os
 import sys
@@ -124,6 +125,13 @@ DISCORD_TOKEN      = os.getenv("FEZ_COLLECTOR_DISCORD_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("FEZ_COLLECTOR_CHANNEL_ID", "0"))  # numeric
 STATE_FILE         = Path(os.getenv("FEZ_COLLECTOR_STATE", "./state/config.json"))
 STALENESS_SECS     = 2 * 60 * 60  # two hours
+
+# EventStream health monitoring settings
+EVENTSTREAM_TIMEOUT_SECS = int(os.getenv("EVENTSTREAM_TIMEOUT_SECS", "600"))  # 10 minutes default
+EVENTSTREAM_CHECK_INTERVAL_SECS = 60  # Check every minute
+
+# Track last event received time
+last_event_time: Optional[float] = None
 USER_AGENT         = os.getenv(
     "USER_AGENT",
     "DiscordFezCollector/1.0 (https://github.com/L235/DiscordFezCollector; User:L235)"
@@ -455,6 +463,41 @@ def format_change(change: dict) -> str:
 # ── EventStreams processing                                                  #
 # --------------------------------------------------------------------------- #
 
+async def eventstream_health_monitor():
+    """
+    Monitor the health of the EventStream connection.
+    If no events are received within EVENTSTREAM_TIMEOUT_SECS, assume the
+    connection is dead and terminate the process for external restart.
+    """
+    global last_event_time
+    
+    logger.info(
+        f"EventStream health monitor started (timeout: {EVENTSTREAM_TIMEOUT_SECS}s, "
+        f"check interval: {EVENTSTREAM_CHECK_INTERVAL_SECS}s)"
+    )
+    
+    # Give the stream some time to initialize before monitoring
+    await asyncio.sleep(EVENTSTREAM_CHECK_INTERVAL_SECS)
+    
+    while True:
+        await asyncio.sleep(EVENTSTREAM_CHECK_INTERVAL_SECS)
+        
+        if last_event_time is None:
+            logger.warning("EventStream health check: No events received yet")
+            continue
+        
+        time_since_last_event = time.time() - last_event_time
+        
+        if time_since_last_event > EVENTSTREAM_TIMEOUT_SECS:
+            logger.error(
+                f"EventStream TIMEOUT: No events received for {time_since_last_event:.0f}s "
+                f"(threshold: {EVENTSTREAM_TIMEOUT_SECS}s). Terminating process for restart."
+            )
+            # Terminate the process - external process manager should restart it
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(5)  # Grace period
+            sys.exit(1)  # Force exit if SIGTERM didn't work
+
 async def stream_worker(channel: discord.TextChannel):
     """
     Background task: tail MediaWiki EventStreams and route posts to **active
@@ -512,12 +555,15 @@ async def stream_worker(channel: discord.TextChannel):
 # asyncio event-loop never stalls on network reads.  A bounded queue
 # provides back-pressure if Discord throttles us.
     # ------------------------------------------------------------------ #
-    queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=1000)
+    queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=2000)  # Increased for headroom
 
     def _producer():
         """
         Blocking producer: iterates EventStreams and enqueues messages.
         Adds simple exponential backoff on errors and logs 403 bodies.
+        
+        This runs in a thread pool executor to avoid blocking the async event loop.
+        Updates global last_event_time on each successful event.
         """
         backoff = 5           # seconds
         max_backoff = 300     # cap
@@ -525,8 +571,31 @@ async def stream_worker(channel: discord.TextChannel):
         while True:
             try:
                 for evt in stream:
+                    global last_event_time
                     backoff = 5  # reset on success
-                    asyncio.run_coroutine_threadsafe(queue.put(evt), loop).result()
+                    
+                    # Update heartbeat timestamp
+                    last_event_time = time.time()
+                    
+                    # Put event in queue with timeout to detect blocking
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            asyncio.wait_for(queue.put(evt), timeout=30.0),
+                            loop
+                        )
+                        future.result(timeout=35.0)  # Slightly longer than inner timeout
+                    except concurrent.futures.TimeoutError:
+                        logger.error(
+                            "Queue.put() timed out - queue may be blocked. "
+                            f"Queue size: {queue.qsize()}/{queue.maxsize}"
+                        )
+                        # This is a critical failure - the processing pipeline is stuck
+                        logger.error("Terminating process due to blocked queue")
+                        os.kill(os.getpid(), signal.SIGTERM)
+                        time.sleep(5)
+                        sys.exit(1)
+                    except Exception as e:
+                        logger.error(f"Failed to enqueue event: {e}")
                 # Iterator ended unexpectedly; reinit.
                 logger.warning("EventStreams iterator ended; reinitializing")
                 _since = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -560,10 +629,24 @@ async def stream_worker(channel: discord.TextChannel):
                     )
                 except Exception as e2:
                     logger.exception("Reinit after HTTP error failed: %r", e2)
+                    # If we can't reinitialize, the stream is broken
+                    logger.error("Unable to reinitialize EventStream after HTTP error. Terminating.")
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(5)
+                    sys.exit(1)
             except Exception as e:
                 logger.exception("EventStreams error: %r; retrying in %ds", e, backoff)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
+                # If backoff has reached max, we're in a persistent failure state
+                if backoff >= max_backoff:
+                    logger.error(
+                        f"EventStream has been failing for extended period "
+                        f"(backoff reached {max_backoff}s). Terminating process."
+                    )
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(5)
+                    sys.exit(1)
 
     loop.run_in_executor(None, _producer)
 
@@ -644,6 +727,10 @@ async def stream_worker(channel: discord.TextChannel):
             await loop.create_task(tgt.send(msg))
         queue.task_done()
 
+# --------------------------------------------------------------------------- #
+# Global task references
+# --------------------------------------------------------------------------- #
+_health_monitor_task: Optional[asyncio.Task] = None
 # --------------------------------------------------------------------------- #
 # ── Discord commands                                                         #
 # --------------------------------------------------------------------------- #
@@ -1087,16 +1174,32 @@ async def on_ready():
         logger.error(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
         sys.exit(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
     logger.info(f"Found target channel: {channel.name} ({channel.id})")
-    # Start the background EventStreams task once.
-    global _stream_task
+    # Start the background EventStreams task and health monitor once.
+    global _stream_task, _health_monitor_task
+    
     if _stream_task is None or _stream_task.done():
         logger.info("Starting EventStreams worker task")
         _stream_task = bot.loop.create_task(stream_worker(channel))
     else:
         logger.info("EventStreams worker already running; not starting another one")
+    
+    if _health_monitor_task is None or _health_monitor_task.done():
+        logger.info("Starting EventStream health monitor task")
+        _health_monitor_task = bot.loop.create_task(eventstream_health_monitor())
+    else:
+        logger.info("EventStream health monitor already running")
 
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
+    sys.exit(0)
 
 def main():
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     try:
         logger.info("Starting Discord bot...")
         bot.run(DISCORD_TOKEN)
