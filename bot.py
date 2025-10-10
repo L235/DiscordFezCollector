@@ -118,6 +118,36 @@ logger = setup_logging()
 logger.info(f"fez_collector {VERSION} initialising...")
 
 # --------------------------------------------------------------------------- #
+# ── Constants                                                                #
+# --------------------------------------------------------------------------- #
+
+# Common constants
+CONFIG_VERSION = "0.8"
+UTF8_ENCODING = "utf-8"
+ISO_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+JSON_INDENT = 2
+
+# Discord limits
+DISCORD_MESSAGE_LIMIT = 2000
+TRUNCATED_MESSAGE_SUFFIX = "..."
+TRUNCATION_BUFFER = 10  # 1990 = 2000 - 10
+
+# Timeout and retry configuration
+class RetryConfig:
+    INITIAL_BACKOFF_SECS = 5
+    MAX_BACKOFF_SECS = 300
+    GRACE_PERIOD_SECS = 5
+
+# EventStream configuration
+class EventStreamConfig:
+    TIMEOUT_SECS = int(os.getenv("EVENTSTREAM_TIMEOUT_SECS", "600"))  # 10 minutes default
+    CHECK_INTERVAL_SECS = 60  # Check every minute
+    QUEUE_MAX_SIZE = 2000
+    QUEUE_PUT_TIMEOUT_SECS = 30.0
+    QUEUE_RESULT_TIMEOUT_SECS = 35.0  # Slightly longer than put timeout
+    ERROR_BODY_LIMIT = 2000
+
+# --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
 # --------------------------------------------------------------------------- #
 
@@ -125,10 +155,6 @@ DISCORD_TOKEN      = os.getenv("FEZ_COLLECTOR_DISCORD_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("FEZ_COLLECTOR_CHANNEL_ID", "0"))  # numeric
 STATE_FILE         = Path(os.getenv("FEZ_COLLECTOR_STATE", "./state/config.json"))
 STALENESS_SECS     = 2 * 60 * 60  # two hours
-
-# EventStream health monitoring settings
-EVENTSTREAM_TIMEOUT_SECS = int(os.getenv("EVENTSTREAM_TIMEOUT_SECS", "600"))  # 10 minutes default
-EVENTSTREAM_CHECK_INTERVAL_SECS = 60  # Check every minute
 
 # Track last event received time
 last_event_time: Optional[float] = None
@@ -147,7 +173,7 @@ if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
 
 
 
-DEFAULT_CUSTOM_CONFIG = {
+DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
     "siteName": "",
     "pageIncludePatterns": [],
     "pageExcludePatterns": [],
@@ -158,7 +184,7 @@ DEFAULT_CUSTOM_CONFIG = {
 }
 
 # Config schema (see docstring):
-DEFAULT_CONFIG = {"version": "0.8", "threads": {}}
+DEFAULT_CONFIG: Dict[str, Any] = {"version": CONFIG_VERSION, "threads": {}}
 
 
 def load_config() -> dict:
@@ -168,7 +194,7 @@ def load_config() -> dict:
         save_config(DEFAULT_CONFIG)
         return DEFAULT_CONFIG.copy()
     logger.debug(f"Loading config from {STATE_FILE}")
-    with STATE_FILE.open(encoding="utf-8") as fp:
+    with STATE_FILE.open(encoding=UTF8_ENCODING) as fp:
         raw = json.load(fp)
     # ensure key exists - older configs will silently keep working,
     # but we no longer mutate them in-place.
@@ -180,13 +206,13 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as fp:
-        json.dump(cfg, fp, indent=2, sort_keys=True)
+    with tmp.open("w", encoding=UTF8_ENCODING) as fp:
+        json.dump(cfg, fp, indent=JSON_INDENT, sort_keys=True)
     tmp.replace(STATE_FILE)
     logger.debug(f"Config saved to {STATE_FILE}")
 
 
-CONFIG = load_config()
+CONFIG: Dict[str, Any] = load_config()
 CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
 
 # --------------------------------------------------------------------------- #
@@ -395,7 +421,7 @@ pwb_config.user_agent_description = USER_AGENT
 # avoids URL-encoding issues.
 # -------------------------------------------------------------------- #
 
-_NOW_UTC_ISO = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+_NOW_UTC_ISO = datetime.now(timezone.utc).replace(microsecond=0).strftime(ISO_TIMESTAMP_FORMAT)
 
 stream = EventStreams(
     streams=["recentchange", "revision-create"],
@@ -428,6 +454,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 # Guard so we start only one worker across reconnects.
 _stream_task: Optional[asyncio.Task] = None
+_health_monitor_task: Optional[asyncio.Task] = None
 
 # --------------------------------------------------------------------------- #
 # ── Message formatting                                                        #
@@ -495,7 +522,7 @@ async def eventstream_health_monitor():
             )
             # Terminate the process - external process manager should restart it
             os.kill(os.getpid(), signal.SIGTERM)
-            await asyncio.sleep(5)  # Grace period
+            await asyncio.sleep(RetryConfig.GRACE_PERIOD_SECS)  # Grace period
             sys.exit(1)  # Force exit if SIGTERM didn't work
 
 async def stream_worker(channel: discord.TextChannel):
@@ -555,7 +582,7 @@ async def stream_worker(channel: discord.TextChannel):
 # asyncio event-loop never stalls on network reads.  A bounded queue
 # provides back-pressure if Discord throttles us.
     # ------------------------------------------------------------------ #
-    queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=2000)  # Increased for headroom
+    event_queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=EventStreamConfig.QUEUE_MAX_SIZE)
 
     def _producer():
         """
@@ -565,14 +592,14 @@ async def stream_worker(channel: discord.TextChannel):
         This runs in a thread pool executor to avoid blocking the async event loop.
         Updates global last_event_time on each successful event.
         """
-        backoff = 5           # seconds
-        max_backoff = 300     # cap
+        retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS
+        max_retry_backoff_seconds = RetryConfig.MAX_BACKOFF_SECS
         global stream
         while True:
             try:
                 for evt in stream:
                     global last_event_time
-                    backoff = 5  # reset on success
+                    retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS  # reset on success
                     
                     # Update heartbeat timestamp
                     last_event_time = time.time()
@@ -580,28 +607,28 @@ async def stream_worker(channel: discord.TextChannel):
                     # Put event in queue with timeout to detect blocking
                     try:
                         future = asyncio.run_coroutine_threadsafe(
-                            asyncio.wait_for(queue.put(evt), timeout=30.0),
+                            asyncio.wait_for(event_queue.put(evt), timeout=EventStreamConfig.QUEUE_PUT_TIMEOUT_SECS),
                             loop
                         )
-                        future.result(timeout=35.0)  # Slightly longer than inner timeout
+                        future.result(timeout=EventStreamConfig.QUEUE_RESULT_TIMEOUT_SECS)
                     except concurrent.futures.TimeoutError:
                         logger.error(
                             "Queue.put() timed out - queue may be blocked. "
-                            f"Queue size: {queue.qsize()}/{queue.maxsize}"
+                            f"Queue size: {event_queue.qsize()}/{event_queue.maxsize}"
                         )
                         # This is a critical failure - the processing pipeline is stuck
                         logger.error("Terminating process due to blocked queue")
                         os.kill(os.getpid(), signal.SIGTERM)
-                        time.sleep(5)
+                        time.sleep(RetryConfig.GRACE_PERIOD_SECS)
                         sys.exit(1)
                     except Exception as e:
                         logger.error(f"Failed to enqueue event: {e}")
                 # Iterator ended unexpectedly; reinit.
                 logger.warning("EventStreams iterator ended; reinitializing")
-                _since = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+                event_stream_since_timestamp = datetime.now(timezone.utc).replace(microsecond=0).strftime(ISO_TIMESTAMP_FORMAT)
                 stream = EventStreams(
                     streams=["recentchange", "revision-create"],
-                    since=_since,
+                    since=event_stream_since_timestamp,
                     headers={"user-agent": USER_AGENT},
                 )
             except requests.HTTPError as e:
@@ -613,18 +640,18 @@ async def stream_worker(channel: discord.TextChannel):
                 except Exception:
                     body = None
                 if status == 403:
-                    logger.error("EventStreams HTTP 403. Body:\n%s", (body or "(no body)")[:2000])
+                    logger.error("EventStreams HTTP 403. Body:\n%s", (body or "(no body)")[:EventStreamConfig.ERROR_BODY_LIMIT])
                 else:
-                    logger.error("EventStreams HTTP error %s. Body:\n%s", status, (body or "(no body)")[:2000])
-                logger.info("Retrying after %ds", backoff)
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                    logger.error("EventStreams HTTP error %s. Body:\n%s", status, (body or "(no body)")[:EventStreamConfig.ERROR_BODY_LIMIT])
+                logger.info("Retrying after %ds", retry_backoff_seconds)
+                time.sleep(retry_backoff_seconds)
+                retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
                 # Reinitialize with fresh since=now
                 try:
-                    _since = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    event_stream_since_timestamp = datetime.now(timezone.utc).replace(microsecond=0).strftime(ISO_TIMESTAMP_FORMAT)
                     stream = EventStreams(
                         streams=["recentchange", "revision-create"],
-                        since=_since,
+                        since=event_stream_since_timestamp,
                         headers={"user-agent": USER_AGENT},
                     )
                 except Exception as e2:
@@ -632,26 +659,26 @@ async def stream_worker(channel: discord.TextChannel):
                     # If we can't reinitialize, the stream is broken
                     logger.error("Unable to reinitialize EventStream after HTTP error. Terminating.")
                     os.kill(os.getpid(), signal.SIGTERM)
-                    time.sleep(5)
+                    time.sleep(RetryConfig.GRACE_PERIOD_SECS)
                     sys.exit(1)
             except Exception as e:
-                logger.exception("EventStreams error: %r; retrying in %ds", e, backoff)
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                logger.exception("EventStreams error: %r; retrying in %ds", e, retry_backoff_seconds)
+                time.sleep(retry_backoff_seconds)
+                retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
                 # If backoff has reached max, we're in a persistent failure state
-                if backoff >= max_backoff:
+                if retry_backoff_seconds >= max_retry_backoff_seconds:
                     logger.error(
                         f"EventStream has been failing for extended period "
-                        f"(backoff reached {max_backoff}s). Terminating process."
+                        f"(backoff reached {max_retry_backoff_seconds}s). Terminating process."
                     )
                     os.kill(os.getpid(), signal.SIGTERM)
-                    time.sleep(5)
+                    time.sleep(RetryConfig.GRACE_PERIOD_SECS)
                     sys.exit(1)
 
     loop.run_in_executor(None, _producer)
 
     while True:
-        change = await queue.get()
+        change = await event_queue.get()
 
         # Robust timestamp handling
         ts = _event_ts_to_epoch(change)
@@ -669,11 +696,11 @@ async def stream_worker(channel: discord.TextChannel):
         # Some events may lack user (rare for rc, common for revision-create)
         user = change.get("user")
         if stale:
-            queue.task_done()
+            event_queue.task_done()
             continue
         if not user:
             # Nothing sensible to route; skip quietly.
-            queue.task_done()
+            event_queue.task_done()
             continue
 
         # Determine routing targets
@@ -695,7 +722,7 @@ async def stream_worker(channel: discord.TextChannel):
             and not any(rx.search(title)   for rx in page_regexes)
             and not any(rx.search(comment) for rx in summary_regexes)
         ):
-            queue.task_done()
+            event_queue.task_done()
             continue  # fast reject before any regex-heavy work
 
         if customs:
@@ -709,12 +736,12 @@ async def stream_worker(channel: discord.TextChannel):
                     logger.warning(f"Custom filter error for {tid}: {e}")
 
         if not targets:
-            queue.task_done()
+            event_queue.task_done()
             continue  # nothing to do
 
         msg = format_change(change)
-        if len(msg) > 2000:  # Discord hard limit
-            msg = msg[:1990] + "..."
+        if len(msg) > DISCORD_MESSAGE_LIMIT:
+            msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
 
         # Send to all targets; fire and forget
         if logger.isEnabledFor(logging.DEBUG):
@@ -725,7 +752,7 @@ async def stream_worker(channel: discord.TextChannel):
             )
         for tgt in targets:
             await loop.create_task(tgt.send(msg))
-        queue.task_done()
+        event_queue.task_done()
 
 # --------------------------------------------------------------------------- #
 # Global task references
@@ -846,7 +873,7 @@ async def globalconfig_group(ctx: commands.Context):
 async def globalconfig_getraw_cmd(ctx: commands.Context):  # noqa: N802
     logger.info(f"Global config getraw command from {ctx.author}")
     async with CONFIG_LOCK:
-        data = json.dumps(CONFIG, indent=2).encode("utf-8")
+        data = json.dumps(CONFIG, indent=JSON_INDENT).encode(UTF8_ENCODING)
     file = discord.File(io.BytesIO(data), filename="global_config.json")
     await ctx.reply(file=file, mention_author=False)
 
@@ -1001,7 +1028,7 @@ async def config_get_cmd(ctx: commands.Context):
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    pretty = json.dumps(entry["config"], indent=2)
+    pretty = json.dumps(entry["config"], indent=JSON_INDENT)
     await ctx.reply(f"```json\n{pretty}\n```")
 
 
@@ -1084,7 +1111,7 @@ async def config_getraw_cmd(ctx: commands.Context):
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    data = json.dumps(entry["config"], indent=2).encode("utf-8")
+    data = json.dumps(entry["config"], indent=JSON_INDENT).encode(UTF8_ENCODING)
     file = discord.File(io.BytesIO(data),
                         filename=f"thread_{ctx.channel.id}_config.json")
     await ctx.reply(file=file, mention_author=False)
