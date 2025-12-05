@@ -132,20 +132,26 @@ DISCORD_MESSAGE_LIMIT = 2000
 TRUNCATED_MESSAGE_SUFFIX = "..."
 TRUNCATION_BUFFER = 10  # 1990 = 2000 - 10
 
-# Timeout and retry configuration
+# Timeout and retry configuration (for EventStreams)
 class RetryConfig:
-    INITIAL_BACKOFF_SECS = 5
-    MAX_BACKOFF_SECS = 300
-    GRACE_PERIOD_SECS = 5
+    INITIAL_BACKOFF_SECS = int(os.getenv("RETRY_INITIAL_BACKOFF_SECS", "5"))
+    MAX_BACKOFF_SECS = int(os.getenv("RETRY_MAX_BACKOFF_SECS", "300"))
+    GRACE_PERIOD_SECS = int(os.getenv("RETRY_GRACE_PERIOD_SECS", "5"))
+
+# Discord API rate limit configuration
+class DiscordRateLimitConfig:
+    MAX_ATTEMPTS = int(os.getenv("DISCORD_RATE_LIMIT_MAX_ATTEMPTS", "5"))
+    INITIAL_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_INITIAL_BACKOFF_SECS", "1"))
+    MAX_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_MAX_BACKOFF_SECS", "60"))
 
 # EventStream configuration
 class EventStreamConfig:
     TIMEOUT_SECS = int(os.getenv("EVENTSTREAM_TIMEOUT_SECS", "600"))  # 10 minutes default
-    CHECK_INTERVAL_SECS = 60  # Check every minute
-    QUEUE_MAX_SIZE = 2000
-    QUEUE_PUT_TIMEOUT_SECS = 30.0
-    QUEUE_RESULT_TIMEOUT_SECS = 35.0  # Slightly longer than put timeout
-    ERROR_BODY_LIMIT = 2000
+    CHECK_INTERVAL_SECS = int(os.getenv("EVENTSTREAM_CHECK_INTERVAL_SECS", "60"))
+    QUEUE_MAX_SIZE = int(os.getenv("EVENTSTREAM_QUEUE_MAX_SIZE", "2000"))
+    QUEUE_PUT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_PUT_TIMEOUT_SECS", "30.0"))
+    QUEUE_RESULT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_RESULT_TIMEOUT_SECS", "35.0"))
+    ERROR_BODY_LIMIT = int(os.getenv("EVENTSTREAM_ERROR_BODY_LIMIT", "2000"))
 
 # --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
@@ -214,6 +220,81 @@ def save_config(cfg: dict) -> None:
 
 CONFIG: Dict[str, Any] = load_config()
 CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
+
+# --------------------------------------------------------------------------- #
+# ── Discord API rate limit handling                                          #
+# --------------------------------------------------------------------------- #
+
+async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
+    """
+    Execute a Discord API coroutine with exponential backoff on rate limits.
+
+    Args:
+        coro_func: An async callable (not an awaitable) that makes a Discord API call
+        *args, **kwargs: Arguments to pass to coro_func
+
+    Returns:
+        The result of the Discord API call
+
+    Raises:
+        discord.NotFound: If the resource was not found (404)
+        discord.Forbidden: If access is denied (403)
+        discord.HTTPException: If max attempts exceeded or other HTTP error
+    """
+    backoff = DiscordRateLimitConfig.INITIAL_BACKOFF_SECS
+    last_exception = None
+
+    for attempt in range(DiscordRateLimitConfig.MAX_ATTEMPTS):
+        try:
+            return await coro_func(*args, **kwargs)
+        except (discord.NotFound, discord.Forbidden):
+            # Let these propagate directly - caller should handle them
+            raise
+        except discord.HTTPException as e:
+            last_exception = e
+            if e.status == 429:
+                # Discord rate limit - use retry_after if provided, otherwise use backoff
+                retry_after = getattr(e, 'retry_after', None)
+                wait_time = retry_after if retry_after else backoff
+
+                logger.warning(
+                    f"Discord rate limit hit (429). Attempt {attempt + 1}/{DiscordRateLimitConfig.MAX_ATTEMPTS}. "
+                    f"Waiting {wait_time:.1f}s before retry..."
+                )
+                await asyncio.sleep(wait_time)
+                backoff = min(backoff * 2, DiscordRateLimitConfig.MAX_BACKOFF_SECS)
+            else:
+                # Non-rate-limit error, don't retry
+                logger.error(f"Discord API error (status {e.status}): {e}")
+                raise
+
+    # Max attempts exceeded
+    logger.error(
+        f"Discord API call failed after {DiscordRateLimitConfig.MAX_ATTEMPTS} attempts. "
+        f"Last error: {last_exception}"
+    )
+    raise last_exception
+
+
+async def send_message_with_backoff(target: discord.abc.Messageable, content: str) -> Optional[discord.Message]:
+    """
+    Send a message to a Discord channel/thread with rate limit handling.
+
+    Args:
+        target: The channel or thread to send to
+        content: The message content
+
+    Returns:
+        The sent Message object, or None if sending failed
+    """
+    try:
+        return await discord_api_call_with_backoff(target.send, content)
+    except discord.HTTPException as e:
+        logger.error(f"Failed to send message to {getattr(target, 'name', target)}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error sending message to {getattr(target, 'name', target)}: {e}")
+        return None
 
 # --------------------------------------------------------------------------- #
 # ── Custom thread helpers                                                    #
@@ -566,11 +647,15 @@ async def stream_worker(channel: discord.TextChannel):
         if th is not None:
             return th
         try:
-            ch = await bot.fetch_channel(tid)
+            ch = await discord_api_call_with_backoff(bot.fetch_channel, tid)
         except (discord.NotFound, discord.Forbidden):
             THREAD_CACHE.pop(tid, None)
             return None
-        except Exception:
+        except discord.HTTPException as e:
+            logger.warning(f"Failed to fetch channel {tid}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Unexpected error fetching channel {tid}: {e}")
             return None
         if isinstance(ch, discord.Thread):
             THREAD_CACHE[tid] = ch
@@ -743,7 +828,7 @@ async def stream_worker(channel: discord.TextChannel):
         if len(msg) > DISCORD_MESSAGE_LIMIT:
             msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
 
-        # Send to all targets; fire and forget
+        # Send to all targets with rate limit handling
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "Sending change to %d target(s): %s",
@@ -751,7 +836,7 @@ async def stream_worker(channel: discord.TextChannel):
                 [tgt.name for tgt in targets],
             )
         for tgt in targets:
-            await loop.create_task(tgt.send(msg))
+            await send_message_with_backoff(tgt, msg)
         event_queue.task_done()
 
 # --------------------------------------------------------------------------- #
@@ -833,15 +918,20 @@ async def add_cmd(ctx: commands.Context, *, user: str):
         await ctx.reply("Run `/add` in the parent channel.")
         return
 
-    # create "User:&lt;Username&gt;" thread
+    # create "User:<Username>" thread
     try:
-        thread = await ctx.channel.create_thread(
+        thread = await discord_api_call_with_backoff(
+            ctx.channel.create_thread,
             name=f"User:{user}",
             type=discord.ChannelType.public_thread
         )
         logger.info(f"Created thread {thread.name} ({thread.id}) for user {user}")
-    except Exception as e:
+    except discord.HTTPException as e:
         logger.error(f"Failed to create thread for user {user}: {e}")
+        await ctx.reply(f"Failed to create thread: {e}")
+        return
+    except Exception as e:
+        logger.error(f"Unexpected error creating thread for user {user}: {e}")
         await ctx.reply(f"Failed to create thread: {e}")
         return
 
@@ -956,13 +1046,18 @@ async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
         await ctx.reply("Please provide a thread name: `/addcustom <name>`.")
         return
     try:
-        thread = await ctx.channel.create_thread(
+        thread = await discord_api_call_with_backoff(
+            ctx.channel.create_thread,
             name=threadname,
             type=discord.ChannelType.public_thread
         )
         logger.info(f"Created custom thread {thread.name} ({thread.id})")
-    except Exception as e:  # pragma: no cover
+    except discord.HTTPException as e:
         logger.error(f"Failed to create custom thread '{threadname}': {e}")
+        await ctx.reply(f"Failed to create thread: {e}")
+        return
+    except Exception as e:
+        logger.error(f"Unexpected error creating custom thread '{threadname}': {e}")
         await ctx.reply(f"Failed to create thread: {e}")
         return
     await ensure_custom_thread_entry(thread, create_if_missing=True)
