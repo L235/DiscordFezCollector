@@ -132,26 +132,26 @@ DISCORD_MESSAGE_LIMIT = 2000
 TRUNCATED_MESSAGE_SUFFIX = "..."
 TRUNCATION_BUFFER = 10  # 1990 = 2000 - 10
 
-# Timeout and retry configuration
+# Timeout and retry configuration (for EventStreams)
 class RetryConfig:
-    INITIAL_BACKOFF_SECS = 5
-    MAX_BACKOFF_SECS = 300
-    GRACE_PERIOD_SECS = 5
+    INITIAL_BACKOFF_SECS = int(os.getenv("RETRY_INITIAL_BACKOFF_SECS", "5"))
+    MAX_BACKOFF_SECS = int(os.getenv("RETRY_MAX_BACKOFF_SECS", "300"))
+    GRACE_PERIOD_SECS = int(os.getenv("RETRY_GRACE_PERIOD_SECS", "5"))
 
 # Discord API rate limit configuration
 class DiscordRateLimitConfig:
-    MAX_RETRIES = 5
-    INITIAL_BACKOFF_SECS = 1
-    MAX_BACKOFF_SECS = 60
+    MAX_RETRIES = int(os.getenv("DISCORD_RATE_LIMIT_MAX_RETRIES", "5"))
+    INITIAL_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_INITIAL_BACKOFF_SECS", "1"))
+    MAX_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_MAX_BACKOFF_SECS", "60"))
 
 # EventStream configuration
 class EventStreamConfig:
     TIMEOUT_SECS = int(os.getenv("EVENTSTREAM_TIMEOUT_SECS", "600"))  # 10 minutes default
-    CHECK_INTERVAL_SECS = 60  # Check every minute
-    QUEUE_MAX_SIZE = 2000
-    QUEUE_PUT_TIMEOUT_SECS = 30.0
-    QUEUE_RESULT_TIMEOUT_SECS = 35.0  # Slightly longer than put timeout
-    ERROR_BODY_LIMIT = 2000
+    CHECK_INTERVAL_SECS = int(os.getenv("EVENTSTREAM_CHECK_INTERVAL_SECS", "60"))
+    QUEUE_MAX_SIZE = int(os.getenv("EVENTSTREAM_QUEUE_MAX_SIZE", "2000"))
+    QUEUE_PUT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_PUT_TIMEOUT_SECS", "30.0"))
+    QUEUE_RESULT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_RESULT_TIMEOUT_SECS", "35.0"))
+    ERROR_BODY_LIMIT = int(os.getenv("EVENTSTREAM_ERROR_BODY_LIMIT", "2000"))
 
 # --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
