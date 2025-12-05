@@ -140,7 +140,7 @@ class RetryConfig:
 
 # Discord API rate limit configuration
 class DiscordRateLimitConfig:
-    MAX_RETRIES = int(os.getenv("DISCORD_RATE_LIMIT_MAX_RETRIES", "5"))
+    MAX_ATTEMPTS = int(os.getenv("DISCORD_RATE_LIMIT_MAX_ATTEMPTS", "5"))
     INITIAL_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_INITIAL_BACKOFF_SECS", "1"))
     MAX_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_MAX_BACKOFF_SECS", "60"))
 
@@ -237,14 +237,19 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
         The result of the Discord API call
 
     Raises:
-        discord.HTTPException: If max retries exceeded or non-rate-limit error
+        discord.NotFound: If the resource was not found (404)
+        discord.Forbidden: If access is denied (403)
+        discord.HTTPException: If max attempts exceeded or other HTTP error
     """
     backoff = DiscordRateLimitConfig.INITIAL_BACKOFF_SECS
     last_exception = None
 
-    for attempt in range(DiscordRateLimitConfig.MAX_RETRIES):
+    for attempt in range(DiscordRateLimitConfig.MAX_ATTEMPTS):
         try:
             return await coro_func(*args, **kwargs)
+        except (discord.NotFound, discord.Forbidden):
+            # Let these propagate directly - caller should handle them
+            raise
         except discord.HTTPException as e:
             last_exception = e
             if e.status == 429:
@@ -253,7 +258,7 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
                 wait_time = retry_after if retry_after else backoff
 
                 logger.warning(
-                    f"Discord rate limit hit (429). Attempt {attempt + 1}/{DiscordRateLimitConfig.MAX_RETRIES}. "
+                    f"Discord rate limit hit (429). Attempt {attempt + 1}/{DiscordRateLimitConfig.MAX_ATTEMPTS}. "
                     f"Waiting {wait_time:.1f}s before retry..."
                 )
                 await asyncio.sleep(wait_time)
@@ -263,9 +268,9 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
                 logger.error(f"Discord API error (status {e.status}): {e}")
                 raise
 
-    # Max retries exceeded
+    # Max attempts exceeded
     logger.error(
-        f"Discord API call failed after {DiscordRateLimitConfig.MAX_RETRIES} attempts. "
+        f"Discord API call failed after {DiscordRateLimitConfig.MAX_ATTEMPTS} attempts. "
         f"Last error: {last_exception}"
     )
     raise last_exception
