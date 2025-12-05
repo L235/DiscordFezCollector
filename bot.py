@@ -16,12 +16,16 @@ fez_collector - Discord edition
 * `FEZ_COLLECTOR_STATE`        - Path to config JSON file (default: "./state/config.json")
 
 **Available Commands (preferred -> legacy):**
-* `/ping`  (`!ping`) - Test bot responsiveness
-* `/add <Username>`  (`!add`) - Create a "User:<Username>" thread **and** add the user to `userIncludeList`
-* `/addcustom <name>`  (`!addcustom`) - Create a generic filter thread (parent channel only)
+* `/thread <name>` (`!addcustom`) - Create a generic filter thread (parent channel only)
+* `/userthread <Username>` (`!add`) - Create a "User:<Username>" thread **and** add the user to `userIncludeList`
+* `/activate` / `/deactivate` - Toggle activity for the *current thread*
+* `/status` - Show current thread configuration (alias for `/config get`)
+* `/track page|user|summary <value>` - Add to include filters
+* `/ignore page|user|summary <value>` - Add to exclude filters
+* `/untrack page|user|summary <value>` - Remove from include filters
+* `/unignore page|user|summary <value>` - Remove from exclude filters
 * `/globalconfig getraw`  - Download full configuration as a JSON attachment
 * `/globalconfig setraw` - **Replace** the entire configuration from an attached JSON file (**dangerous**)
-* `/activate` / `/deactivate` - Toggle activity for the *current thread*
 * `/config [get]` - Show current thread configuration
 * `/config set <key> <json>` - Set configuration value
 * `/config getraw` - Download raw JSON for the current thread
@@ -865,57 +869,62 @@ async def fezhelp_cmd(ctx: commands.Context):
 
 **Basic Commands:**
 * `/fezhelp` - Show this help message
+* `/status` - Show current thread configuration
 
-**Thread Management:**
-* `/add <Username>` - Create a "User:Username" thread and add the user to `userIncludeList`
-* `/addcustom <name>` - Create a generic filter thread (parent channel only)
+**Thread Management (run in parent channel):**
+* `/thread <name>` - Create a new tracking thread
+* `/userthread <Username>` - Create a "User:Username" thread and auto-add to userIncludeList
 * `/activate` - Activate current thread
 * `/deactivate` - Deactivate current thread
+
+**Tracking Shortcuts (run inside a thread):**
+* `/track page|user|summary <value>` - Add to include filters
+* `/ignore page|user|summary <value>` - Add to exclude filters
+* `/untrack page|user|summary <value>` - Remove from include filters
+* `/unignore page|user|summary <value>` - Remove from exclude filters
 
 **Global Configuration:**
 * `/globalconfig getraw` - Download full configuration as JSON
 * `/globalconfig setraw` - Replace configuration from attached JSON file (DANGEROUS)
 
-**Thread Configuration:**
-* `/config` - Show current thread configuration
-* `/config getraw` - Download raw JSON for current thread
-* `/config setraw` - Replace current-thread configuration from attached JSON (DANGEROUS)
+**Advanced Thread Configuration:**
+* `/config` - Show current thread configuration (same as `/status`)
 * `/config set <key> <json>` - Set configuration value
 * `/config add <key> <value>` - Add to list configuration
 * `/config remove <key> <value>` - Remove from list configuration
 * `/config clear <key>` - Clear list configuration
+* `/config getraw` - Download raw JSON for current thread
+* `/config setraw` - Replace current-thread configuration from attached JSON (DANGEROUS)
 
 **Configuration Keys:**
 * `siteName` - Filter by site (e.g., "en.wikipedia.org")
-* `pageIncludePatterns` - Pages to include (regex patterns)
-* `pageExcludePatterns` - Pages to exclude (regex patterns)
-* `userIncludeList` - Users to include
-* `userExcludeList` - Users to exclude
-* `summaryIncludePatterns` - Summary patterns to include
-* `summaryExcludePatterns` - Summary patterns to exclude
+* `pageIncludePatterns` / `pageExcludePatterns` - Page regex patterns
+* `userIncludeList` / `userExcludeList` - User lists
+* `summaryIncludePatterns` / `summaryExcludePatterns` - Summary regex patterns
 
 **Legacy Commands (still work):**
-* `!add`, `!addcustom`, `!activate`, `!deactivate`, `!config`"""
-    
+* `!add` (→ `/userthread`), `!addcustom` (→ `/thread`), `!activate`, `!deactivate`, `!config`"""
+
     await ctx.reply(help_text)
 
 
 
 
 
-@bot.hybrid_command(name="add",
+@bot.hybrid_command(name="userthread",
+                    aliases=["add"],
                     description="Create a per-user custom thread and include them",
                     with_app_command=True)
-async def add_cmd(ctx: commands.Context, *, user: str):
+async def userthread_cmd(ctx: commands.Context, *, user: str):
     """
-    Convenience wrapper that delegates to the new `/addcustom` logic,
+    Convenience wrapper that creates a User:<username> thread,
     then appends the supplied username to `userIncludeList`.
     """
-    logger.info(f"Add command from {ctx.author} for user '{user}' in {ctx.channel}")
-    
+    logger.info(f"Userthread command from {ctx.author} for user '{user}' in {ctx.channel}")
+
     if ctx.channel.id != DISCORD_CHANNEL_ID:
-        logger.warning(f"Add command attempted in wrong channel: {ctx.channel.id} (expected {DISCORD_CHANNEL_ID})")
-        await ctx.reply("Run `/add` in the parent channel.")
+        logger.warning(f"Userthread command attempted in wrong channel: {ctx.channel.id} (expected {DISCORD_CHANNEL_ID})")
+        await ctx.reply("Run `/userthread` in the parent channel.")
         return
 
     # create "User:<Username>" thread
@@ -1030,20 +1039,21 @@ def _deepcopy_cfg(obj: Any) -> Any:
         return obj
 
 
-@bot.hybrid_command(name="addcustom",
+@bot.hybrid_command(name="thread",
+                    aliases=["addcustom"],
                     description="Create a custom-filter thread (parent channel only)",
                     with_app_command=True)
-async def addcustom_cmd(ctx: commands.Context, *, threadname: str = ""):
-    """/addcustom <threadname> → create a custom filter thread (in parent channel only)."""
-    logger.info(f"Addcustom command from {ctx.author} for thread '{threadname}' in {ctx.channel}")
+async def thread_cmd(ctx: commands.Context, *, threadname: str = ""):
+    """/thread <threadname> → create a custom filter thread (in parent channel only)."""
+    logger.info(f"Thread command from {ctx.author} for thread '{threadname}' in {ctx.channel}")
     
     if not _in_parent_channel(ctx):
-        logger.warning(f"Addcustom command attempted in wrong channel: {ctx.channel.id}")
-        await ctx.reply("Use `/addcustom` in the parent channel.")
+        logger.warning(f"Thread command attempted in wrong channel: {ctx.channel.id}")
+        await ctx.reply("Use `/thread` in the parent channel.")
         return
     if not threadname.strip():
-        logger.warning("Addcustom command attempted without thread name")
-        await ctx.reply("Please provide a thread name: `/addcustom <name>`.")
+        logger.warning("Thread command attempted without thread name")
+        await ctx.reply("Please provide a thread name: `/thread <name>`.")
         return
     try:
         thread = await discord_api_call_with_backoff(
@@ -1244,6 +1254,281 @@ async def config_setraw_cmd(ctx: commands.Context):
     else:
         await ctx.reply("Failed to replace configuration.",
                         mention_author=False)
+
+# --------------------------------------------------------------------------- #
+# ── Tracking shortcut commands                                               #
+# --------------------------------------------------------------------------- #
+
+# Mapping from shortcut target to config key
+_INCLUDE_KEY_MAP = {
+    "page": "pageIncludePatterns",
+    "user": "userIncludeList",
+    "summary": "summaryIncludePatterns",
+}
+
+_EXCLUDE_KEY_MAP = {
+    "page": "pageExcludePatterns",
+    "user": "userExcludeList",
+    "summary": "summaryExcludePatterns",
+}
+
+
+@bot.hybrid_group(name="track",
+                  invoke_without_command=True,
+                  description="Add to include filters (shortcut for /config add)",
+                  with_app_command=True)
+async def track_group(ctx: commands.Context):
+    """`/track` (no subcommand) -> show usage."""
+    await ctx.reply("Usage: `/track page|user|summary <value>`")
+
+
+@track_group.command(name="page",
+                     description="Add a page pattern to include")
+async def track_page_cmd(ctx: commands.Context, *, pattern: str):
+    logger.info(f"Track page command from {ctx.author}: {pattern}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "pageIncludePatterns", add=vals
+    )
+    if ok:
+        await ctx.reply(f"Now tracking pages matching: `{vals}`\n`pageIncludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to add pattern.")
+
+
+@track_group.command(name="user",
+                     description="Add a user to include")
+async def track_user_cmd(ctx: commands.Context, *, username: str):
+    logger.info(f"Track user command from {ctx.author}: {username}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(username)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "userIncludeList", add=vals
+    )
+    if ok:
+        await ctx.reply(f"Now tracking user(s): `{vals}`\n`userIncludeList`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to add user.")
+
+
+@track_group.command(name="summary",
+                     description="Add a summary pattern to include")
+async def track_summary_cmd(ctx: commands.Context, *, pattern: str):
+    logger.info(f"Track summary command from {ctx.author}: {pattern}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "summaryIncludePatterns", add=vals
+    )
+    if ok:
+        await ctx.reply(f"Now tracking summaries matching: `{vals}`\n`summaryIncludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to add pattern.")
+
+
+@bot.hybrid_group(name="ignore",
+                  invoke_without_command=True,
+                  description="Add to exclude filters (shortcut for /config add)",
+                  with_app_command=True)
+async def ignore_group(ctx: commands.Context):
+    """`/ignore` (no subcommand) -> show usage."""
+    await ctx.reply("Usage: `/ignore page|user|summary <value>`")
+
+
+@ignore_group.command(name="page",
+                      description="Add a page pattern to exclude")
+async def ignore_page_cmd(ctx: commands.Context, *, pattern: str):
+    logger.info(f"Ignore page command from {ctx.author}: {pattern}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "pageExcludePatterns", add=vals
+    )
+    if ok:
+        await ctx.reply(f"Now ignoring pages matching: `{vals}`\n`pageExcludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to add pattern.")
+
+
+@ignore_group.command(name="user",
+                      description="Add a user to exclude")
+async def ignore_user_cmd(ctx: commands.Context, *, username: str):
+    logger.info(f"Ignore user command from {ctx.author}: {username}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(username)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "userExcludeList", add=vals
+    )
+    if ok:
+        await ctx.reply(f"Now ignoring user(s): `{vals}`\n`userExcludeList`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to add user.")
+
+
+@ignore_group.command(name="summary",
+                      description="Add a summary pattern to exclude")
+async def ignore_summary_cmd(ctx: commands.Context, *, pattern: str):
+    logger.info(f"Ignore summary command from {ctx.author}: {pattern}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "summaryExcludePatterns", add=vals
+    )
+    if ok:
+        await ctx.reply(f"Now ignoring summaries matching: `{vals}`\n`summaryExcludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to add pattern.")
+
+
+@bot.hybrid_group(name="untrack",
+                  invoke_without_command=True,
+                  description="Remove from include filters (shortcut for /config remove)",
+                  with_app_command=True)
+async def untrack_group(ctx: commands.Context):
+    """`/untrack` (no subcommand) -> show usage."""
+    await ctx.reply("Usage: `/untrack page|user|summary <value>`")
+
+
+@untrack_group.command(name="page",
+                       description="Remove a page pattern from include list")
+async def untrack_page_cmd(ctx: commands.Context, *, pattern: str):
+    logger.info(f"Untrack page command from {ctx.author}: {pattern}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "pageIncludePatterns", remove=vals
+    )
+    if ok:
+        await ctx.reply(f"Removed page pattern(s): `{vals}`\n`pageIncludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to remove pattern.")
+
+
+@untrack_group.command(name="user",
+                       description="Remove a user from include list")
+async def untrack_user_cmd(ctx: commands.Context, *, username: str):
+    logger.info(f"Untrack user command from {ctx.author}: {username}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(username)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "userIncludeList", remove=vals
+    )
+    if ok:
+        await ctx.reply(f"Removed user(s): `{vals}`\n`userIncludeList`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to remove user.")
+
+
+@untrack_group.command(name="summary",
+                       description="Remove a summary pattern from include list")
+async def untrack_summary_cmd(ctx: commands.Context, *, pattern: str):
+    logger.info(f"Untrack summary command from {ctx.author}: {pattern}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "summaryIncludePatterns", remove=vals
+    )
+    if ok:
+        await ctx.reply(f"Removed summary pattern(s): `{vals}`\n`summaryIncludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to remove pattern.")
+
+
+@bot.hybrid_group(name="unignore",
+                  invoke_without_command=True,
+                  description="Remove from exclude filters (shortcut for /config remove)",
+                  with_app_command=True)
+async def unignore_group(ctx: commands.Context):
+    """`/unignore` (no subcommand) -> show usage."""
+    await ctx.reply("Usage: `/unignore page|user|summary <value>`")
+
+
+@unignore_group.command(name="page",
+                        description="Remove a page pattern from exclude list")
+async def unignore_page_cmd(ctx: commands.Context, *, pattern: str):
+    logger.info(f"Unignore page command from {ctx.author}: {pattern}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "pageExcludePatterns", remove=vals
+    )
+    if ok:
+        await ctx.reply(f"Removed page exclude pattern(s): `{vals}`\n`pageExcludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to remove pattern.")
+
+
+@unignore_group.command(name="user",
+                        description="Remove a user from exclude list")
+async def unignore_user_cmd(ctx: commands.Context, *, username: str):
+    logger.info(f"Unignore user command from {ctx.author}: {username}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(username)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "userExcludeList", remove=vals
+    )
+    if ok:
+        await ctx.reply(f"Removed user(s) from exclude list: `{vals}`\n`userExcludeList`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to remove user.")
+
+
+@unignore_group.command(name="summary",
+                        description="Remove a summary pattern from exclude list")
+async def unignore_summary_cmd(ctx: commands.Context, *, pattern: str):
+    logger.info(f"Unignore summary command from {ctx.author}: {pattern}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_custom_thread_config_list(
+        ctx.channel.id, "summaryExcludePatterns", remove=vals
+    )
+    if ok:
+        await ctx.reply(f"Removed summary exclude pattern(s): `{vals}`\n`summaryExcludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply("Failed to remove pattern.")
+
+
+# --------------------------------------------------------------------------- #
+# ── Status command (alias for /config get)                                   #
+# --------------------------------------------------------------------------- #
+
+@bot.hybrid_command(name="status",
+                    description="Show current thread configuration",
+                    with_app_command=True)
+async def status_cmd(ctx: commands.Context):
+    """Alias for `/config get` - shows current thread configuration."""
+    logger.info(f"Status command from {ctx.author} in thread {ctx.channel.id}")
+    entry = await _require_custom_thread(ctx)
+    if not entry:
+        return
+    pretty = json.dumps(entry["config"], indent=JSON_INDENT)
+    await ctx.reply(f"```json\n{pretty}\n```")
+
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
