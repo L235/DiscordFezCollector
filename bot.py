@@ -352,7 +352,6 @@ async def send_message_with_backoff(target: discord.abc.Messageable, content: st
 
 class WebhookError(Exception):
     """Raised when a webhook send fails permanently."""
-    pass
 
 
 # Cache for webhook objects: url -> discord.Webhook
@@ -687,11 +686,11 @@ class CustomFilter:
     )
 
     def __init__(self, cfg: dict):
-        self.site_name   = cfg.get("siteName", "") or ""
+        self.site_name = cfg.get("siteName", "") or ""
         self.page_include = _compile_pattern_list(cfg.get("pageIncludePatterns", []))
         self.page_exclude = _compile_pattern_list(cfg.get("pageExcludePatterns", []))
-        self.sum_include  = _compile_pattern_list(cfg.get("summaryIncludePatterns", []))
-        self.sum_exclude  = _compile_pattern_list(cfg.get("summaryExcludePatterns", []))
+        self.sum_include = _compile_pattern_list(cfg.get("summaryIncludePatterns", []))
+        self.sum_exclude = _compile_pattern_list(cfg.get("summaryExcludePatterns", []))
         self.user_include = set(cfg.get("userIncludeList", []))
         self.user_exclude = set(cfg.get("userExcludeList", []))
 
@@ -726,33 +725,21 @@ class CustomFilter:
 # --------------------------------------------------------------------------- #
 # ── MediaWiki EventStreams setup                                             #
 # --------------------------------------------------------------------------- #
-
-#
 # We no longer restrict to a single wiki; collect everything and filter later.
 # This will include non-English projects unless custom filters narrow scope.
-#
+
 site = Site()  # default site; EventStreams ignores this for global streams
-# -------------------------------------------------------------------- #
-# Set a descriptive Pywikibot UA.
 pwb_config.user_agent_description = USER_AGENT
 
-# -------------------------------------------------------------------- #
-# EventStreams requires its `since=` parameter to be either a Unix-ms
-# epoch or an ISO-8601 timestamp *without* micro-seconds and without a
-# literal "+" in the TZ designator (the plus would be decoded as
-# whitespace on the server side).  Using "Z" explicitly marks UTC and
-# avoids URL-encoding issues.
-# -------------------------------------------------------------------- #
-
+# EventStreams requires `since=` as Unix-ms epoch or ISO-8601 timestamp
+# *without* microseconds and without "+" in TZ (would decode as whitespace).
 _NOW_UTC_ISO = datetime.now(timezone.utc).replace(microsecond=0).strftime(ISO_TIMESTAMP_FORMAT)
 
 stream = EventStreams(
     streams=["recentchange", "revision-create"],
     since=_NOW_UTC_ISO,
-    # Also set UA header for the EventStreams connection.
     headers={"user-agent": USER_AGENT},
 )
-# (no register_filter)
 
 # --------------------------------------------------------------------------- #
 # ── Caches & runtime state                                                   #
@@ -871,9 +858,9 @@ async def stream_worker(channel: discord.TextChannel):
             if not entry.get("active", False):
                 FILTER_CACHE.pop(int(tid_str), None)
                 continue
-            tid        = int(tid_str)
-            fp         = _fingerprint(entry["config"])
-            cached     = FILTER_CACHE.get(tid)
+            tid = int(tid_str)
+            fp = _fingerprint(entry["config"])
+            cached = FILTER_CACHE.get(tid)
             if cached and cached[0] == fp:
                 filt = cached[1]
             else:
@@ -1073,16 +1060,16 @@ async def stream_worker(channel: discord.TextChannel):
         # ----------  (#2) ultra-cheap global short-circuit ---------------- #
         # Combine filters from both threads and receivers for fast-reject
         all_filters = [f for _, f in customs] + [f for _, f in receivers]
-        user_whitelist  = {u for f in all_filters for u in f.user_include}
-        page_regexes    = [f.page_include for f in all_filters if f.page_include]
+        user_whitelist = {u for f in all_filters for u in f.user_include}
+        page_regexes = [f.page_include for f in all_filters if f.page_include]
         summary_regexes = [f.sum_include for f in all_filters if f.sum_include]
 
-        title   = change.get("title", "")
+        title = change.get("title", "")
         comment = change.get("log_action_comment") or change.get("comment") or ""
 
         if (
             change["user"] not in user_whitelist
-            and not any(rx.search(title)   for rx in page_regexes)
+            and not any(rx.search(title) for rx in page_regexes)
             and not any(rx.search(comment) for rx in summary_regexes)
         ):
             event_queue.task_done()
@@ -2182,17 +2169,19 @@ async def on_command_error(ctx, error):
     else:
         logger.error(f"Command error from {ctx.author} in {ctx.channel}: {error}")
 
-# ------------------------------------------------------------------------ #
-#  Thread-cache invalidation                                               #
-# ------------------------------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+# ── Thread-cache invalidation                                                #
+# --------------------------------------------------------------------------- #
 
 @bot.event
 async def on_thread_update(before: discord.Thread, after: discord.Thread):
     THREAD_CACHE[after.id] = after
 
+
 @bot.event
 async def on_thread_delete(thread: discord.Thread):
     THREAD_CACHE.pop(thread.id, None)
+
 
 @bot.event
 async def on_ready():
@@ -2205,11 +2194,6 @@ async def on_ready():
         logger.warning(f"Failed to sync application commands: {e}")
 
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
-    # Preload custom thread entries for existing threads (best effort)
-    async with CONFIG_LOCK:
-        # nothing to do here; entries created on demand
-        pass
-
     if channel is None:
         logger.error(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
         sys.exit(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
