@@ -67,7 +67,6 @@ fez_collector - Discord edition
 VERSION = "0.9-webhooks"
 
 import asyncio
-import aiohttp
 import concurrent.futures
 import json
 import requests
@@ -168,13 +167,6 @@ class EventStreamConfig:
     QUEUE_PUT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_PUT_TIMEOUT_SECS", "30.0"))
     QUEUE_RESULT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_RESULT_TIMEOUT_SECS", "35.0"))
     ERROR_BODY_LIMIT = int(os.getenv("EVENTSTREAM_ERROR_BODY_LIMIT", "2000"))
-
-# Webhook configuration (reuses Discord rate limit config for backoff)
-class WebhookConfig:
-    MAX_ATTEMPTS = int(os.getenv("WEBHOOK_MAX_ATTEMPTS", "5"))
-    INITIAL_BACKOFF_SECS = float(os.getenv("WEBHOOK_INITIAL_BACKOFF_SECS", "1"))
-    MAX_BACKOFF_SECS = float(os.getenv("WEBHOOK_MAX_BACKOFF_SECS", "60"))
-    TIMEOUT_SECS = float(os.getenv("WEBHOOK_TIMEOUT_SECS", "30"))
 
 # --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
@@ -356,7 +348,7 @@ async def send_message_with_backoff(target: discord.abc.Messageable, content: st
         return None
 
 # --------------------------------------------------------------------------- #
-# ── Webhook sending with backoff                                              #
+# ── Webhook sending with backoff (using discord.py native support)            #
 # --------------------------------------------------------------------------- #
 
 class WebhookError(Exception):
@@ -364,17 +356,20 @@ class WebhookError(Exception):
     pass
 
 
+# Cache for webhook objects: url -> discord.Webhook
+_WEBHOOK_CACHE: Dict[str, discord.Webhook] = {}
+
+
 async def send_webhook_with_backoff(
-    session: aiohttp.ClientSession,
     webhook_url: str,
     content: str,
     receiver_key: str
 ) -> bool:
     """
     Send a message to a Discord webhook with exponential backoff on rate limits.
+    Uses discord.py's native webhook support.
 
     Args:
-        session: aiohttp ClientSession to use
         webhook_url: The Discord webhook URL
         content: The message content
         receiver_key: Key identifying this receiver (for logging)
@@ -385,74 +380,33 @@ async def send_webhook_with_backoff(
     Raises:
         WebhookError: If the webhook is permanently broken (404, 401, etc.)
     """
-    backoff = WebhookConfig.INITIAL_BACKOFF_SECS
-    last_error = None
-
-    for attempt in range(WebhookConfig.MAX_ATTEMPTS):
+    # Get or create webhook object (discord.py handles the session internally)
+    webhook = _WEBHOOK_CACHE.get(webhook_url)
+    if webhook is None:
         try:
-            async with session.post(
-                webhook_url,
-                json={"content": content},
-                timeout=aiohttp.ClientTimeout(total=WebhookConfig.TIMEOUT_SECS)
-            ) as resp:
-                if resp.status == 204 or resp.status == 200:
-                    return True
-                elif resp.status == 429:
-                    # Rate limited - check for retry_after header
-                    retry_after = None
-                    try:
-                        data = await resp.json()
-                        retry_after = data.get("retry_after")
-                    except Exception:
-                        pass
-                    wait_time = retry_after if retry_after else backoff
-                    logger.warning(
-                        f"Webhook rate limit hit for '{receiver_key}' (429). "
-                        f"Attempt {attempt + 1}/{WebhookConfig.MAX_ATTEMPTS}. "
-                        f"Waiting {wait_time:.1f}s..."
-                    )
-                    await asyncio.sleep(wait_time)
-                    backoff = min(backoff * 2, WebhookConfig.MAX_BACKOFF_SECS)
-                elif resp.status in (401, 403, 404):
-                    # Permanent failure - webhook deleted or invalid
-                    body = await resp.text()
-                    logger.error(
-                        f"Webhook permanently failed for '{receiver_key}' "
-                        f"(status {resp.status}): {body[:200]}"
-                    )
-                    raise WebhookError(f"Webhook returned {resp.status}: {body[:100]}")
-                else:
-                    # Other error - log and retry
-                    body = await resp.text()
-                    last_error = f"HTTP {resp.status}: {body[:100]}"
-                    logger.warning(
-                        f"Webhook error for '{receiver_key}' (status {resp.status}). "
-                        f"Attempt {attempt + 1}/{WebhookConfig.MAX_ATTEMPTS}. Retrying..."
-                    )
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, WebhookConfig.MAX_BACKOFF_SECS)
-        except aiohttp.ClientError as e:
-            last_error = str(e)
-            logger.warning(
-                f"Webhook connection error for '{receiver_key}': {e}. "
-                f"Attempt {attempt + 1}/{WebhookConfig.MAX_ATTEMPTS}. Retrying..."
-            )
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, WebhookConfig.MAX_BACKOFF_SECS)
-        except WebhookError:
-            raise
+            webhook = discord.Webhook.from_url(webhook_url, client=bot)
+            _WEBHOOK_CACHE[webhook_url] = webhook
         except Exception as e:
-            last_error = str(e)
-            logger.error(f"Unexpected webhook error for '{receiver_key}': {e}")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, WebhookConfig.MAX_BACKOFF_SECS)
+            logger.error(f"Invalid webhook URL for '{receiver_key}': {e}")
+            raise WebhookError(f"Invalid webhook URL: {e}")
 
-    # Max attempts exceeded
-    logger.error(
-        f"Webhook failed for '{receiver_key}' after {WebhookConfig.MAX_ATTEMPTS} attempts. "
-        f"Last error: {last_error}"
-    )
-    raise WebhookError(f"Max attempts exceeded: {last_error}")
+    try:
+        # Use the existing backoff helper - it handles 429s and retries
+        await discord_api_call_with_backoff(webhook.send, content)
+        return True
+    except discord.NotFound:
+        # Webhook was deleted
+        _WEBHOOK_CACHE.pop(webhook_url, None)
+        logger.error(f"Webhook not found for '{receiver_key}' (deleted?)")
+        raise WebhookError("Webhook not found (404)")
+    except discord.Forbidden:
+        # Permission denied
+        _WEBHOOK_CACHE.pop(webhook_url, None)
+        logger.error(f"Webhook forbidden for '{receiver_key}'")
+        raise WebhookError("Webhook forbidden (403)")
+    except discord.HTTPException as e:
+        logger.error(f"Webhook HTTP error for '{receiver_key}': {e}")
+        raise WebhookError(f"HTTP error: {e}")
 
 # --------------------------------------------------------------------------- #
 # ── Custom thread helpers                                                    #
@@ -1079,112 +1033,110 @@ async def stream_worker(channel: discord.TextChannel):
 
     loop.run_in_executor(None, _producer)
 
-    # Create aiohttp session for webhook calls (reused across all sends)
-    async with aiohttp.ClientSession() as webhook_session:
-        while True:
-            change = await event_queue.get()
+    while True:
+        change = await event_queue.get()
 
-            # Robust timestamp handling
-            ts = _event_ts_to_epoch(change)
-            if ts is None:
-                # If we cannot determine freshness, treat as *not stale* but log once.
-                # To avoid log spam, gate on an attribute.
-                if not getattr(stream_worker, "_warned_missing_ts", False):
-                    logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
-                    setattr(stream_worker, "_warned_missing_ts", True)
-                stale = False
-            else:
-                current_time = datetime.now(timezone.utc).timestamp()
-                stale = (current_time - ts) > STALENESS_SECS
+        # Robust timestamp handling
+        ts = _event_ts_to_epoch(change)
+        if ts is None:
+            # If we cannot determine freshness, treat as *not stale* but log once.
+            # To avoid log spam, gate on an attribute.
+            if not getattr(stream_worker, "_warned_missing_ts", False):
+                logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
+                setattr(stream_worker, "_warned_missing_ts", True)
+            stale = False
+        else:
+            current_time = datetime.now(timezone.utc).timestamp()
+            stale = (current_time - ts) > STALENESS_SECS
 
-            # Some events may lack user (rare for rc, common for revision-create)
-            user = change.get("user")
-            if stale:
-                event_queue.task_done()
-                continue
-            if not user:
-                # Nothing sensible to route; skip quietly.
-                event_queue.task_done()
-                continue
-
-            # Determine routing targets
-            targets: List[discord.abc.Messageable] = []
-            receiver_targets: List[str] = []  # List of receiver keys to send to
-
-            # Custom threads and receivers
-            customs = await active_custom_filters()
-            receivers = await active_receiver_filters()
-
-            # ----------  (#2) ultra-cheap global short-circuit ---------------- #
-            # Combine filters from both threads and receivers for fast-reject
-            all_filters = [(None, f) for _, f in customs] + [(None, f) for _, f in receivers]
-            user_whitelist  = {u for _, f in all_filters for u in f.user_include}
-            page_regexes    = [f.page_include for _, f in all_filters if f.page_include]
-            summary_regexes = [f.sum_include for _, f in all_filters if f.sum_include]
-
-            title   = change.get("title", "")
-            comment = change.get("log_action_comment") or change.get("comment") or ""
-
-            if (
-                change["user"] not in user_whitelist
-                and not any(rx.search(title)   for rx in page_regexes)
-                and not any(rx.search(comment) for rx in summary_regexes)
-            ):
-                event_queue.task_done()
-                continue  # fast reject before any regex-heavy work
-
-            # Match against thread filters
-            if customs:
-                for tid, filt in customs:
-                    try:
-                        if filt.matches(change):
-                            th = await get_thread_obj(tid)
-                            if th is not None:
-                                targets.append(th)
-                    except Exception as e:  # pragma: no cover
-                        logger.warning(f"Custom filter error for {tid}: {e}")
-
-            # Match against receiver filters
-            if receivers:
-                for key, filt in receivers:
-                    try:
-                        if filt.matches(change):
-                            receiver_targets.append(key)
-                    except Exception as e:
-                        logger.warning(f"Receiver filter error for '{key}': {e}")
-
-            if not targets and not receiver_targets:
-                event_queue.task_done()
-                continue  # nothing to do
-
-            msg = format_change(change)
-            if len(msg) > DISCORD_MESSAGE_LIMIT:
-                msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
-
-            # Send to thread targets with rate limit handling
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "Sending change to %d thread(s) and %d receiver(s)",
-                    len(targets),
-                    len(receiver_targets),
-                )
-            for tgt in targets:
-                await send_message_with_backoff(tgt, msg)
-
-            # Send to receiver webhooks
-            for key in receiver_targets:
-                webhook_url = WEBHOOKS.get(key)
-                if not webhook_url:
-                    logger.warning(f"Receiver '{key}' matched but no webhook URL")
-                    continue
-                try:
-                    await send_webhook_with_backoff(webhook_session, webhook_url, msg, key)
-                except WebhookError as e:
-                    logger.error(f"Webhook error for receiver '{key}': {e}")
-                    # Mark receiver as errored so it stops receiving
-                    await set_receiver_errored(key)
-
+        # Some events may lack user (rare for rc, common for revision-create)
+        user = change.get("user")
+        if stale:
             event_queue.task_done()
+            continue
+        if not user:
+            # Nothing sensible to route; skip quietly.
+            event_queue.task_done()
+            continue
+
+        # Determine routing targets
+        targets: List[discord.abc.Messageable] = []
+        receiver_targets: List[str] = []  # List of receiver keys to send to
+
+        # Custom threads and receivers
+        customs = await active_custom_filters()
+        receivers = await active_receiver_filters()
+
+        # ----------  (#2) ultra-cheap global short-circuit ---------------- #
+        # Combine filters from both threads and receivers for fast-reject
+        all_filters = [(None, f) for _, f in customs] + [(None, f) for _, f in receivers]
+        user_whitelist  = {u for _, f in all_filters for u in f.user_include}
+        page_regexes    = [f.page_include for _, f in all_filters if f.page_include]
+        summary_regexes = [f.sum_include for _, f in all_filters if f.sum_include]
+
+        title   = change.get("title", "")
+        comment = change.get("log_action_comment") or change.get("comment") or ""
+
+        if (
+            change["user"] not in user_whitelist
+            and not any(rx.search(title)   for rx in page_regexes)
+            and not any(rx.search(comment) for rx in summary_regexes)
+        ):
+            event_queue.task_done()
+            continue  # fast reject before any regex-heavy work
+
+        # Match against thread filters
+        if customs:
+            for tid, filt in customs:
+                try:
+                    if filt.matches(change):
+                        th = await get_thread_obj(tid)
+                        if th is not None:
+                            targets.append(th)
+                except Exception as e:  # pragma: no cover
+                    logger.warning(f"Custom filter error for {tid}: {e}")
+
+        # Match against receiver filters
+        if receivers:
+            for key, filt in receivers:
+                try:
+                    if filt.matches(change):
+                        receiver_targets.append(key)
+                except Exception as e:
+                    logger.warning(f"Receiver filter error for '{key}': {e}")
+
+        if not targets and not receiver_targets:
+            event_queue.task_done()
+            continue  # nothing to do
+
+        msg = format_change(change)
+        if len(msg) > DISCORD_MESSAGE_LIMIT:
+            msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
+
+        # Send to thread targets with rate limit handling
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Sending change to %d thread(s) and %d receiver(s)",
+                len(targets),
+                len(receiver_targets),
+            )
+        for tgt in targets:
+            await send_message_with_backoff(tgt, msg)
+
+        # Send to receiver webhooks (uses discord.py native webhook support)
+        for key in receiver_targets:
+            webhook_url = WEBHOOKS.get(key)
+            if not webhook_url:
+                logger.warning(f"Receiver '{key}' matched but no webhook URL")
+                continue
+            try:
+                await send_webhook_with_backoff(webhook_url, msg, key)
+            except WebhookError as e:
+                logger.error(f"Webhook error for receiver '{key}': {e}")
+                # Mark receiver as errored so it stops receiving
+                await set_receiver_errored(key)
+
+        event_queue.task_done()
 
 # --------------------------------------------------------------------------- #
 # Global task references
