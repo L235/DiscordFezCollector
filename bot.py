@@ -1136,7 +1136,12 @@ async def stream_worker(channel: discord.TextChannel):
 # --------------------------------------------------------------------------- #
 
 def authorised(ctx) -> bool:
-    """Gatekeeper: only allow the bot owner."""
+    """
+    Gatekeeper: only allow the bot owner.
+    Note: This used to be much more permissive, but due to the switch to a 
+    forthcoming cross-server bot, we've temporarily restricted it to the bot owner.
+    A more feature-rich permission system will be implemented in the future.
+    """
     return ctx.author.id == OWNER_ID
 
 
