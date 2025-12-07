@@ -32,10 +32,10 @@ fez_collector - Discord edition
 * `/config setraw` - **Replace** the current thread configuration from an attached JSON file (**dangerous**)
 * `/config add|remove|clear ...` - Mutate list-type configuration fields
 
-**Config Schema (v0.8):**
+**Config Schema (v0.9):**
 
       {
-          "version": "0.8",
+          "version": "0.9",
           "threads": {
               "<thread_id>": {
                   "name": "User:Username",       # display only
@@ -50,12 +50,24 @@ fez_collector - Discord edition
                       "summaryExcludePatterns": []
                   }
               }
+          },
+          "receivers": {
+              "<key>": {                        # key matches FEZ_WEBHOOKS entry
+                  "name": "Display name",
+                  "active": true,
+                  "errored": false,             # set true on webhook failure
+                  "config": { ... }             # same structure as thread config
+              }
           }
       }
+
+**Environment Variables (new):**
+* `FEZ_WEBHOOKS` - Comma-separated webhook mappings: "key1=https://...,key2=https://..."
 """
-VERSION = "0.8-discord-harmonised"
+VERSION = "0.9-webhooks"
 
 import asyncio
+import aiohttp
 import concurrent.futures
 import json
 import requests
@@ -126,7 +138,7 @@ logger.info(f"fez_collector {VERSION} initialising...")
 # --------------------------------------------------------------------------- #
 
 # Common constants
-CONFIG_VERSION = "0.8"
+CONFIG_VERSION = "0.9"
 UTF8_ENCODING = "utf-8"
 ISO_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 JSON_INDENT = 2
@@ -157,6 +169,13 @@ class EventStreamConfig:
     QUEUE_RESULT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_RESULT_TIMEOUT_SECS", "35.0"))
     ERROR_BODY_LIMIT = int(os.getenv("EVENTSTREAM_ERROR_BODY_LIMIT", "2000"))
 
+# Webhook configuration (reuses Discord rate limit config for backoff)
+class WebhookConfig:
+    MAX_ATTEMPTS = int(os.getenv("WEBHOOK_MAX_ATTEMPTS", "5"))
+    INITIAL_BACKOFF_SECS = float(os.getenv("WEBHOOK_INITIAL_BACKOFF_SECS", "1"))
+    MAX_BACKOFF_SECS = float(os.getenv("WEBHOOK_MAX_BACKOFF_SECS", "60"))
+    TIMEOUT_SECS = float(os.getenv("WEBHOOK_TIMEOUT_SECS", "30"))
+
 # --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
 # --------------------------------------------------------------------------- #
@@ -178,6 +197,41 @@ if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
     sys.exit("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
 
 # --------------------------------------------------------------------------- #
+# ── Webhook URL parsing                                                       #
+# --------------------------------------------------------------------------- #
+
+def parse_webhooks_env() -> Dict[str, str]:
+    """
+    Parse FEZ_WEBHOOKS env var.
+    Format: "key1=https://discord.com/api/webhooks/...,key2=https://..."
+    Returns dict mapping key -> URL.
+    """
+    raw = os.getenv("FEZ_WEBHOOKS", "")
+    if not raw.strip():
+        return {}
+    result = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if "=" not in pair:
+            logger.warning(f"Invalid webhook entry (missing '='): {pair}")
+            continue
+        key, url = pair.split("=", 1)
+        key = key.strip()
+        url = url.strip()
+        if not key:
+            logger.warning(f"Empty webhook key in: {pair}")
+            continue
+        if not url.startswith("https://"):
+            logger.warning(f"Webhook URL must start with https://: {url}")
+            continue
+        result[key] = url
+    if result:
+        logger.info(f"Loaded {len(result)} webhook(s) from FEZ_WEBHOOKS: {list(result.keys())}")
+    return result
+
+WEBHOOKS: Dict[str, str] = parse_webhooks_env()
+
+# --------------------------------------------------------------------------- #
 # ── Config management                                                        #
 # --------------------------------------------------------------------------- #
 
@@ -194,7 +248,7 @@ DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
 }
 
 # Config schema (see docstring):
-DEFAULT_CONFIG: Dict[str, Any] = {"version": CONFIG_VERSION, "threads": {}}
+DEFAULT_CONFIG: Dict[str, Any] = {"version": CONFIG_VERSION, "threads": {}, "receivers": {}}
 
 
 def load_config() -> dict:
@@ -206,9 +260,10 @@ def load_config() -> dict:
     logger.debug(f"Loading config from {STATE_FILE}")
     with STATE_FILE.open(encoding=UTF8_ENCODING) as fp:
         raw = json.load(fp)
-    # ensure key exists - older configs will silently keep working,
+    # ensure keys exist - older configs will silently keep working,
     # but we no longer mutate them in-place.
     raw.setdefault("threads", {})
+    raw.setdefault("receivers", {})
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("Loaded config with %d threads", len(raw.get("threads", {})))
     return raw
@@ -299,6 +354,105 @@ async def send_message_with_backoff(target: discord.abc.Messageable, content: st
     except Exception as e:
         logger.error(f"Unexpected error sending message to {getattr(target, 'name', target)}: {e}")
         return None
+
+# --------------------------------------------------------------------------- #
+# ── Webhook sending with backoff                                              #
+# --------------------------------------------------------------------------- #
+
+class WebhookError(Exception):
+    """Raised when a webhook send fails permanently."""
+    pass
+
+
+async def send_webhook_with_backoff(
+    session: aiohttp.ClientSession,
+    webhook_url: str,
+    content: str,
+    receiver_key: str
+) -> bool:
+    """
+    Send a message to a Discord webhook with exponential backoff on rate limits.
+
+    Args:
+        session: aiohttp ClientSession to use
+        webhook_url: The Discord webhook URL
+        content: The message content
+        receiver_key: Key identifying this receiver (for logging)
+
+    Returns:
+        True if message was sent successfully
+
+    Raises:
+        WebhookError: If the webhook is permanently broken (404, 401, etc.)
+    """
+    backoff = WebhookConfig.INITIAL_BACKOFF_SECS
+    last_error = None
+
+    for attempt in range(WebhookConfig.MAX_ATTEMPTS):
+        try:
+            async with session.post(
+                webhook_url,
+                json={"content": content},
+                timeout=aiohttp.ClientTimeout(total=WebhookConfig.TIMEOUT_SECS)
+            ) as resp:
+                if resp.status == 204 or resp.status == 200:
+                    return True
+                elif resp.status == 429:
+                    # Rate limited - check for retry_after header
+                    retry_after = None
+                    try:
+                        data = await resp.json()
+                        retry_after = data.get("retry_after")
+                    except Exception:
+                        pass
+                    wait_time = retry_after if retry_after else backoff
+                    logger.warning(
+                        f"Webhook rate limit hit for '{receiver_key}' (429). "
+                        f"Attempt {attempt + 1}/{WebhookConfig.MAX_ATTEMPTS}. "
+                        f"Waiting {wait_time:.1f}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+                    backoff = min(backoff * 2, WebhookConfig.MAX_BACKOFF_SECS)
+                elif resp.status in (401, 403, 404):
+                    # Permanent failure - webhook deleted or invalid
+                    body = await resp.text()
+                    logger.error(
+                        f"Webhook permanently failed for '{receiver_key}' "
+                        f"(status {resp.status}): {body[:200]}"
+                    )
+                    raise WebhookError(f"Webhook returned {resp.status}: {body[:100]}")
+                else:
+                    # Other error - log and retry
+                    body = await resp.text()
+                    last_error = f"HTTP {resp.status}: {body[:100]}"
+                    logger.warning(
+                        f"Webhook error for '{receiver_key}' (status {resp.status}). "
+                        f"Attempt {attempt + 1}/{WebhookConfig.MAX_ATTEMPTS}. Retrying..."
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, WebhookConfig.MAX_BACKOFF_SECS)
+        except aiohttp.ClientError as e:
+            last_error = str(e)
+            logger.warning(
+                f"Webhook connection error for '{receiver_key}': {e}. "
+                f"Attempt {attempt + 1}/{WebhookConfig.MAX_ATTEMPTS}. Retrying..."
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, WebhookConfig.MAX_BACKOFF_SECS)
+        except WebhookError:
+            raise
+        except Exception as e:
+            last_error = str(e)
+            logger.error(f"Unexpected webhook error for '{receiver_key}': {e}")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, WebhookConfig.MAX_BACKOFF_SECS)
+
+    # Max attempts exceeded
+    logger.error(
+        f"Webhook failed for '{receiver_key}' after {WebhookConfig.MAX_ATTEMPTS} attempts. "
+        f"Last error: {last_error}"
+    )
+    raise WebhookError(f"Max attempts exceeded: {last_error}")
 
 # --------------------------------------------------------------------------- #
 # ── Custom thread helpers                                                    #
@@ -419,6 +573,133 @@ async def mutate_custom_thread_config_list(thread_id: int, key: str, *, add: Opt
         save_config(CONFIG)
         return True, list(cfg[key])
 
+# --------------------------------------------------------------------------- #
+# ── Receiver (webhook) helpers                                                #
+# --------------------------------------------------------------------------- #
+
+def _validate_receiver_key(key: str) -> bool:
+    """Validate receiver key format: alphanumeric + underscores only."""
+    return bool(re.match(r'^[a-zA-Z0-9_]+$', key))
+
+
+async def get_receiver_entry(key: str) -> Optional[dict]:
+    """Get a receiver config entry by key."""
+    async with CONFIG_LOCK:
+        return CONFIG.get("receivers", {}).get(key)
+
+
+async def create_receiver(key: str, name: str) -> Tuple[bool, str]:
+    """
+    Create a new receiver entry.
+    Returns (success, message).
+    """
+    if not _validate_receiver_key(key):
+        return False, "Key must be alphanumeric with underscores only"
+    if key not in WEBHOOKS:
+        return False, f"No webhook URL found for key '{key}' in FEZ_WEBHOOKS env var"
+
+    async with CONFIG_LOCK:
+        if key in CONFIG.get("receivers", {}):
+            return False, f"Receiver '{key}' already exists"
+        CONFIG.setdefault("receivers", {})[key] = {
+            "name": name,
+            "active": False,  # Start inactive until explicitly activated
+            "errored": False,
+            "config": _blank_custom_cfg(),
+        }
+        save_config(CONFIG)
+        logger.info(f"Created receiver '{key}' with name '{name}'")
+    return True, f"Created receiver '{key}'"
+
+
+async def delete_receiver(key: str) -> Tuple[bool, str]:
+    """Delete a receiver entry."""
+    async with CONFIG_LOCK:
+        receivers = CONFIG.get("receivers", {})
+        if key not in receivers:
+            return False, f"Receiver '{key}' not found"
+        del receivers[key]
+        save_config(CONFIG)
+        logger.info(f"Deleted receiver '{key}'")
+    return True, f"Deleted receiver '{key}'"
+
+
+async def set_receiver_active(key: str, active: bool) -> Tuple[bool, str]:
+    """Set receiver active state."""
+    if active and key not in WEBHOOKS:
+        return False, f"Cannot activate: no webhook URL for '{key}' in FEZ_WEBHOOKS"
+
+    async with CONFIG_LOCK:
+        receivers = CONFIG.get("receivers", {})
+        if key not in receivers:
+            return False, f"Receiver '{key}' not found"
+        entry = receivers[key]
+        if active and entry.get("errored"):
+            # Reset errored state when reactivating
+            entry["errored"] = False
+            logger.info(f"Cleared error state for receiver '{key}'")
+        entry["active"] = active
+        save_config(CONFIG)
+        state = "activated" if active else "deactivated"
+        logger.info(f"Receiver '{key}' {state}")
+    return True, f"Receiver '{key}' {state}"
+
+
+async def set_receiver_errored(key: str) -> bool:
+    """Mark a receiver as errored (called when webhook fails)."""
+    async with CONFIG_LOCK:
+        receivers = CONFIG.get("receivers", {})
+        if key not in receivers:
+            return False
+        receivers[key]["errored"] = True
+        receivers[key]["active"] = False  # Auto-deactivate on error
+        save_config(CONFIG)
+        logger.warning(f"Receiver '{key}' marked as errored and deactivated")
+    return True
+
+
+async def update_receiver_config(key: str, new_cfg: dict) -> bool:
+    """Update a receiver's filter config."""
+    async with CONFIG_LOCK:
+        receivers = CONFIG.get("receivers", {})
+        if key not in receivers:
+            return False
+        receivers[key]["config"] = new_cfg
+        save_config(CONFIG)
+        logger.info(f"Updated config for receiver '{key}'")
+    return True
+
+
+async def mutate_receiver_config_list(
+    key: str,
+    field: str,
+    *,
+    add: Optional[List[str]] = None,
+    remove: Optional[List[str]] = None,
+    clear: bool = False
+) -> Tuple[bool, Optional[List[str]]]:
+    """Mutate a list field in a receiver's config."""
+    async with CONFIG_LOCK:
+        receivers = CONFIG.get("receivers", {})
+        if key not in receivers:
+            return False, None
+        cfg = receivers[key]["config"]
+        if field not in cfg:
+            cfg[field] = []
+        if clear:
+            cfg[field] = []
+        else:
+            lst = list(cfg[field])
+            if add:
+                for it in add:
+                    if it not in lst:
+                        lst.append(it)
+            if remove:
+                lst = [it for it in lst if it not in remove]
+            cfg[field] = lst
+        save_config(CONFIG)
+        return True, list(cfg[field])
+
 
 def _compile_pattern_list(patterns: List[str]) -> Optional[re.Pattern]:
     """
@@ -524,6 +805,8 @@ stream = EventStreams(
 FILTER_CACHE: Dict[int, Tuple[str, "CustomFilter"]] = {}
 #  thread_id → discord.Thread
 THREAD_CACHE: Dict[int, discord.Thread] = {}
+#  receiver_key → (fingerprint, CustomFilter)
+RECEIVER_FILTER_CACHE: Dict[str, Tuple[str, "CustomFilter"]] = {}
 
 def _fingerprint(cfg: dict) -> str:
     """Deterministic (& cheap) fingerprint for a config dict."""
@@ -643,6 +926,36 @@ async def stream_worker(channel: discord.TextChannel):
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Found %d active custom filters", len(out))
+        return out
+
+    async def active_receiver_filters() -> List[Tuple[str, "CustomFilter"]]:
+        """
+        Return list of (receiver_key, CustomFilter) for **active** receivers,
+        rebuilding a filter only if its config actually changed.
+        """
+        async with CONFIG_LOCK:
+            snapshot = list(CONFIG.get("receivers", {}).items())
+
+        out: List[Tuple[str, "CustomFilter"]] = []
+        for key, entry in snapshot:
+            # Skip inactive or errored receivers, or those without webhook URLs
+            if not entry.get("active", False) or entry.get("errored", False):
+                RECEIVER_FILTER_CACHE.pop(key, None)
+                continue
+            if key not in WEBHOOKS:
+                logger.warning(f"Receiver '{key}' active but no webhook URL in env")
+                continue
+            fp = _fingerprint(entry["config"])
+            cached = RECEIVER_FILTER_CACHE.get(key)
+            if cached and cached[0] == fp:
+                filt = cached[1]
+            else:
+                filt = CustomFilter(entry["config"])
+                RECEIVER_FILTER_CACHE[key] = (fp, filt)
+            out.append((key, filt))
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Found %d active receiver filters", len(out))
         return out
 
     async def get_thread_obj(tid: int) -> Optional[discord.Thread]:
@@ -766,82 +1079,112 @@ async def stream_worker(channel: discord.TextChannel):
 
     loop.run_in_executor(None, _producer)
 
-    while True:
-        change = await event_queue.get()
+    # Create aiohttp session for webhook calls (reused across all sends)
+    async with aiohttp.ClientSession() as webhook_session:
+        while True:
+            change = await event_queue.get()
 
-        # Robust timestamp handling
-        ts = _event_ts_to_epoch(change)
-        if ts is None:
-            # If we cannot determine freshness, treat as *not stale* but log once.
-            # To avoid log spam, gate on an attribute.
-            if not getattr(stream_worker, "_warned_missing_ts", False):
-                logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
-                setattr(stream_worker, "_warned_missing_ts", True)
-            stale = False
-        else:
-            current_time = datetime.now(timezone.utc).timestamp()
-            stale = (current_time - ts) > STALENESS_SECS
+            # Robust timestamp handling
+            ts = _event_ts_to_epoch(change)
+            if ts is None:
+                # If we cannot determine freshness, treat as *not stale* but log once.
+                # To avoid log spam, gate on an attribute.
+                if not getattr(stream_worker, "_warned_missing_ts", False):
+                    logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
+                    setattr(stream_worker, "_warned_missing_ts", True)
+                stale = False
+            else:
+                current_time = datetime.now(timezone.utc).timestamp()
+                stale = (current_time - ts) > STALENESS_SECS
 
-        # Some events may lack user (rare for rc, common for revision-create)
-        user = change.get("user")
-        if stale:
-            event_queue.task_done()
-            continue
-        if not user:
-            # Nothing sensible to route; skip quietly.
-            event_queue.task_done()
-            continue
+            # Some events may lack user (rare for rc, common for revision-create)
+            user = change.get("user")
+            if stale:
+                event_queue.task_done()
+                continue
+            if not user:
+                # Nothing sensible to route; skip quietly.
+                event_queue.task_done()
+                continue
 
-        # Determine routing targets
-        targets: List[discord.abc.Messageable] = []
+            # Determine routing targets
+            targets: List[discord.abc.Messageable] = []
+            receiver_targets: List[str] = []  # List of receiver keys to send to
 
-        # Custom threads only
-        customs = await active_custom_filters()
+            # Custom threads and receivers
+            customs = await active_custom_filters()
+            receivers = await active_receiver_filters()
 
-        # ----------  (#2) ultra-cheap global short-circuit ---------------- #
-        user_whitelist  = {u for _, f in customs for u in f.user_include}
-        page_regexes    = [f.page_include for _, f in customs if f.page_include]
-        summary_regexes = [f.sum_include for _, f in customs if f.sum_include]
+            # ----------  (#2) ultra-cheap global short-circuit ---------------- #
+            # Combine filters from both threads and receivers for fast-reject
+            all_filters = [(None, f) for _, f in customs] + [(None, f) for _, f in receivers]
+            user_whitelist  = {u for _, f in all_filters for u in f.user_include}
+            page_regexes    = [f.page_include for _, f in all_filters if f.page_include]
+            summary_regexes = [f.sum_include for _, f in all_filters if f.sum_include]
 
-        title   = change.get("title", "")
-        comment = change.get("log_action_comment") or change.get("comment") or ""
+            title   = change.get("title", "")
+            comment = change.get("log_action_comment") or change.get("comment") or ""
 
-        if (
-            change["user"] not in user_whitelist
-            and not any(rx.search(title)   for rx in page_regexes)
-            and not any(rx.search(comment) for rx in summary_regexes)
-        ):
-            event_queue.task_done()
-            continue  # fast reject before any regex-heavy work
+            if (
+                change["user"] not in user_whitelist
+                and not any(rx.search(title)   for rx in page_regexes)
+                and not any(rx.search(comment) for rx in summary_regexes)
+            ):
+                event_queue.task_done()
+                continue  # fast reject before any regex-heavy work
 
-        if customs:
-            for tid, filt in customs:
+            # Match against thread filters
+            if customs:
+                for tid, filt in customs:
+                    try:
+                        if filt.matches(change):
+                            th = await get_thread_obj(tid)
+                            if th is not None:
+                                targets.append(th)
+                    except Exception as e:  # pragma: no cover
+                        logger.warning(f"Custom filter error for {tid}: {e}")
+
+            # Match against receiver filters
+            if receivers:
+                for key, filt in receivers:
+                    try:
+                        if filt.matches(change):
+                            receiver_targets.append(key)
+                    except Exception as e:
+                        logger.warning(f"Receiver filter error for '{key}': {e}")
+
+            if not targets and not receiver_targets:
+                event_queue.task_done()
+                continue  # nothing to do
+
+            msg = format_change(change)
+            if len(msg) > DISCORD_MESSAGE_LIMIT:
+                msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
+
+            # Send to thread targets with rate limit handling
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Sending change to %d thread(s) and %d receiver(s)",
+                    len(targets),
+                    len(receiver_targets),
+                )
+            for tgt in targets:
+                await send_message_with_backoff(tgt, msg)
+
+            # Send to receiver webhooks
+            for key in receiver_targets:
+                webhook_url = WEBHOOKS.get(key)
+                if not webhook_url:
+                    logger.warning(f"Receiver '{key}' matched but no webhook URL")
+                    continue
                 try:
-                    if filt.matches(change):
-                        th = await get_thread_obj(tid)
-                        if th is not None:
-                            targets.append(th)
-                except Exception as e:  # pragma: no cover
-                    logger.warning(f"Custom filter error for {tid}: {e}")
+                    await send_webhook_with_backoff(webhook_session, webhook_url, msg, key)
+                except WebhookError as e:
+                    logger.error(f"Webhook error for receiver '{key}': {e}")
+                    # Mark receiver as errored so it stops receiving
+                    await set_receiver_errored(key)
 
-        if not targets:
             event_queue.task_done()
-            continue  # nothing to do
-
-        msg = format_change(change)
-        if len(msg) > DISCORD_MESSAGE_LIMIT:
-            msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
-
-        # Send to all targets with rate limit handling
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Sending change to %d target(s): %s",
-                len(targets),
-                [tgt.name for tgt in targets],
-            )
-        for tgt in targets:
-            await send_message_with_backoff(tgt, msg)
-        event_queue.task_done()
 
 # --------------------------------------------------------------------------- #
 # Global task references
@@ -895,6 +1238,14 @@ async def fezhelp_cmd(ctx: commands.Context):
 * `/config clear <key>` - Clear list configuration
 * `/config getraw` - Download raw JSON for current thread
 * `/config setraw` - Replace current-thread configuration from attached JSON (DANGEROUS)
+
+**Receiver Commands (owner only - for webhook feeds):**
+* `/receiver list` - List all receivers
+* `/receiver add <key> <name>` - Create a new receiver
+* `/receiver remove <key>` - Delete a receiver
+* `/receiver activate <key>` / `/receiver deactivate <key>` - Toggle receiver
+* `/receiver config <key>` - Show receiver configuration
+* `/receiver track|ignore|untrack|unignore <key> page|user|summary <value>` - Manage filters
 
 **Configuration Keys:**
 * `siteName` - Filter by site (e.g., "en.wikipedia.org")
@@ -1528,6 +1879,348 @@ async def status_cmd(ctx: commands.Context):
         return
     pretty = json.dumps(entry["config"], indent=JSON_INDENT)
     await ctx.reply(f"```json\n{pretty}\n```")
+
+
+# --------------------------------------------------------------------------- #
+# ── Receiver (webhook) commands                                               #
+# --------------------------------------------------------------------------- #
+
+def is_bot_owner(ctx) -> bool:
+    """Check if user is the bot owner."""
+    return ctx.author.id == bot.owner_id
+
+
+@bot.hybrid_group(name="receiver",
+                  invoke_without_command=True,
+                  description="Manage webhook receivers (owner only)",
+                  with_app_command=True)
+@commands.check(is_bot_owner)
+async def receiver_group(ctx: commands.Context):
+    """`/receiver` (no subcommand) -> show usage."""
+    await ctx.reply(
+        "**Receiver Commands (owner only):**\n"
+        "* `/receiver list` - List all receivers\n"
+        "* `/receiver add <key> <name>` - Create a new receiver\n"
+        "* `/receiver remove <key>` - Delete a receiver\n"
+        "* `/receiver activate <key>` - Activate a receiver\n"
+        "* `/receiver deactivate <key>` - Deactivate a receiver\n"
+        "* `/receiver config <key>` - Show receiver config\n"
+        "* `/receiver track <key> page|user|summary <value>` - Add to include filters\n"
+        "* `/receiver ignore <key> page|user|summary <value>` - Add to exclude filters\n"
+        "* `/receiver untrack <key> page|user|summary <value>` - Remove from include filters\n"
+        "* `/receiver unignore <key> page|user|summary <value>` - Remove from exclude filters"
+    )
+
+
+@receiver_group.command(name="list",
+                        description="List all receivers")
+@commands.check(is_bot_owner)
+async def receiver_list_cmd(ctx: commands.Context):
+    """List all configured receivers."""
+    logger.info(f"Receiver list command from {ctx.author}")
+    async with CONFIG_LOCK:
+        receivers = CONFIG.get("receivers", {})
+
+    if not receivers:
+        await ctx.reply("No receivers configured.")
+        return
+
+    lines = ["**Configured Receivers:**"]
+    for key, entry in receivers.items():
+        status_parts = []
+        if entry.get("active"):
+            status_parts.append("active")
+        else:
+            status_parts.append("inactive")
+        if entry.get("errored"):
+            status_parts.append("ERRORED")
+        has_webhook = "webhook" if key in WEBHOOKS else "NO WEBHOOK"
+        status = ", ".join(status_parts)
+        lines.append(f"* `{key}`: {entry.get('name', '(unnamed)')} [{status}, {has_webhook}]")
+
+    await ctx.reply("\n".join(lines))
+
+
+@receiver_group.command(name="add",
+                        description="Create a new receiver")
+@commands.check(is_bot_owner)
+async def receiver_add_cmd(ctx: commands.Context, key: str, *, name: str):
+    """Create a new receiver with the given key and name."""
+    logger.info(f"Receiver add command from {ctx.author}: key={key}, name={name}")
+    ok, msg = await create_receiver(key, name)
+    await ctx.reply(msg)
+
+
+@receiver_group.command(name="remove",
+                        description="Delete a receiver")
+@commands.check(is_bot_owner)
+async def receiver_remove_cmd(ctx: commands.Context, key: str):
+    """Delete a receiver by key."""
+    logger.info(f"Receiver remove command from {ctx.author}: key={key}")
+    ok, msg = await delete_receiver(key)
+    await ctx.reply(msg)
+
+
+@receiver_group.command(name="activate",
+                        description="Activate a receiver")
+@commands.check(is_bot_owner)
+async def receiver_activate_cmd(ctx: commands.Context, key: str):
+    """Activate a receiver by key."""
+    logger.info(f"Receiver activate command from {ctx.author}: key={key}")
+    ok, msg = await set_receiver_active(key, True)
+    await ctx.reply(msg)
+
+
+@receiver_group.command(name="deactivate",
+                        description="Deactivate a receiver")
+@commands.check(is_bot_owner)
+async def receiver_deactivate_cmd(ctx: commands.Context, key: str):
+    """Deactivate a receiver by key."""
+    logger.info(f"Receiver deactivate command from {ctx.author}: key={key}")
+    ok, msg = await set_receiver_active(key, False)
+    await ctx.reply(msg)
+
+
+@receiver_group.command(name="config",
+                        description="Show receiver configuration")
+@commands.check(is_bot_owner)
+async def receiver_config_cmd(ctx: commands.Context, key: str):
+    """Show configuration for a receiver."""
+    logger.info(f"Receiver config command from {ctx.author}: key={key}")
+    entry = await get_receiver_entry(key)
+    if not entry:
+        await ctx.reply(f"Receiver `{key}` not found.")
+        return
+    pretty = json.dumps(entry, indent=JSON_INDENT)
+    await ctx.reply(f"**Receiver `{key}`:**\n```json\n{pretty}\n```")
+
+
+@receiver_group.command(name="setconfig",
+                        description="Set a configuration key for a receiver")
+@commands.check(is_bot_owner)
+async def receiver_setconfig_cmd(ctx: commands.Context, key: str, config_key: str, *, value: str):
+    """Set a configuration value for a receiver."""
+    logger.info(f"Receiver setconfig command from {ctx.author}: {key}.{config_key} = {value}")
+    entry = await get_receiver_entry(key)
+    if not entry:
+        await ctx.reply(f"Receiver `{key}` not found.")
+        return
+    parsed = _parse_json_arg(value)
+    cfg = _deepcopy_cfg(entry["config"])
+    cfg[config_key] = parsed
+    ok = await update_receiver_config(key, cfg)
+    if ok:
+        await ctx.reply(f"Set `{config_key}` for receiver `{key}`: `{parsed}`")
+    else:
+        await ctx.reply("Failed to set configuration.")
+
+
+# --------------------------------------------------------------------------- #
+# ── Receiver track/ignore commands                                            #
+# --------------------------------------------------------------------------- #
+
+@receiver_group.group(name="track",
+                      invoke_without_command=True,
+                      description="Add to receiver include filters")
+@commands.check(is_bot_owner)
+async def receiver_track_group(ctx: commands.Context):
+    """`/receiver track` (no subcommand) -> show usage."""
+    await ctx.reply("Usage: `/receiver track page|user|summary <key> <value>`")
+
+
+@receiver_track_group.command(name="page",
+                              description="Add a page pattern to receiver include list")
+@commands.check(is_bot_owner)
+async def receiver_track_page_cmd(ctx: commands.Context, key: str, *, pattern: str):
+    """Add a page pattern to receiver's include list."""
+    logger.info(f"Receiver track page command from {ctx.author}: {key} += {pattern}")
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_receiver_config_list(key, "pageIncludePatterns", add=vals)
+    if ok:
+        await ctx.reply(f"Receiver `{key}` now tracking pages: `{vals}`\n`pageIncludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_track_group.command(name="user",
+                              description="Add a user to receiver include list")
+@commands.check(is_bot_owner)
+async def receiver_track_user_cmd(ctx: commands.Context, key: str, *, username: str):
+    """Add a user to receiver's include list."""
+    logger.info(f"Receiver track user command from {ctx.author}: {key} += {username}")
+    vals = _normalise_list_val(username)
+    ok, new_list = await mutate_receiver_config_list(key, "userIncludeList", add=vals)
+    if ok:
+        await ctx.reply(f"Receiver `{key}` now tracking user(s): `{vals}`\n`userIncludeList`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_track_group.command(name="summary",
+                              description="Add a summary pattern to receiver include list")
+@commands.check(is_bot_owner)
+async def receiver_track_summary_cmd(ctx: commands.Context, key: str, *, pattern: str):
+    """Add a summary pattern to receiver's include list."""
+    logger.info(f"Receiver track summary command from {ctx.author}: {key} += {pattern}")
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_receiver_config_list(key, "summaryIncludePatterns", add=vals)
+    if ok:
+        await ctx.reply(f"Receiver `{key}` now tracking summaries: `{vals}`\n`summaryIncludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_group.group(name="ignore",
+                      invoke_without_command=True,
+                      description="Add to receiver exclude filters")
+@commands.check(is_bot_owner)
+async def receiver_ignore_group(ctx: commands.Context):
+    """`/receiver ignore` (no subcommand) -> show usage."""
+    await ctx.reply("Usage: `/receiver ignore page|user|summary <key> <value>`")
+
+
+@receiver_ignore_group.command(name="page",
+                               description="Add a page pattern to receiver exclude list")
+@commands.check(is_bot_owner)
+async def receiver_ignore_page_cmd(ctx: commands.Context, key: str, *, pattern: str):
+    """Add a page pattern to receiver's exclude list."""
+    logger.info(f"Receiver ignore page command from {ctx.author}: {key} += {pattern}")
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_receiver_config_list(key, "pageExcludePatterns", add=vals)
+    if ok:
+        await ctx.reply(f"Receiver `{key}` now ignoring pages: `{vals}`\n`pageExcludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_ignore_group.command(name="user",
+                               description="Add a user to receiver exclude list")
+@commands.check(is_bot_owner)
+async def receiver_ignore_user_cmd(ctx: commands.Context, key: str, *, username: str):
+    """Add a user to receiver's exclude list."""
+    logger.info(f"Receiver ignore user command from {ctx.author}: {key} += {username}")
+    vals = _normalise_list_val(username)
+    ok, new_list = await mutate_receiver_config_list(key, "userExcludeList", add=vals)
+    if ok:
+        await ctx.reply(f"Receiver `{key}` now ignoring user(s): `{vals}`\n`userExcludeList`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_ignore_group.command(name="summary",
+                               description="Add a summary pattern to receiver exclude list")
+@commands.check(is_bot_owner)
+async def receiver_ignore_summary_cmd(ctx: commands.Context, key: str, *, pattern: str):
+    """Add a summary pattern to receiver's exclude list."""
+    logger.info(f"Receiver ignore summary command from {ctx.author}: {key} += {pattern}")
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_receiver_config_list(key, "summaryExcludePatterns", add=vals)
+    if ok:
+        await ctx.reply(f"Receiver `{key}` now ignoring summaries: `{vals}`\n`summaryExcludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_group.group(name="untrack",
+                      invoke_without_command=True,
+                      description="Remove from receiver include filters")
+@commands.check(is_bot_owner)
+async def receiver_untrack_group(ctx: commands.Context):
+    """`/receiver untrack` (no subcommand) -> show usage."""
+    await ctx.reply("Usage: `/receiver untrack page|user|summary <key> <value>`")
+
+
+@receiver_untrack_group.command(name="page",
+                                description="Remove a page pattern from receiver include list")
+@commands.check(is_bot_owner)
+async def receiver_untrack_page_cmd(ctx: commands.Context, key: str, *, pattern: str):
+    """Remove a page pattern from receiver's include list."""
+    logger.info(f"Receiver untrack page command from {ctx.author}: {key} -= {pattern}")
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_receiver_config_list(key, "pageIncludePatterns", remove=vals)
+    if ok:
+        await ctx.reply(f"Removed page pattern(s) from receiver `{key}`: `{vals}`\n`pageIncludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_untrack_group.command(name="user",
+                                description="Remove a user from receiver include list")
+@commands.check(is_bot_owner)
+async def receiver_untrack_user_cmd(ctx: commands.Context, key: str, *, username: str):
+    """Remove a user from receiver's include list."""
+    logger.info(f"Receiver untrack user command from {ctx.author}: {key} -= {username}")
+    vals = _normalise_list_val(username)
+    ok, new_list = await mutate_receiver_config_list(key, "userIncludeList", remove=vals)
+    if ok:
+        await ctx.reply(f"Removed user(s) from receiver `{key}`: `{vals}`\n`userIncludeList`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_untrack_group.command(name="summary",
+                                description="Remove a summary pattern from receiver include list")
+@commands.check(is_bot_owner)
+async def receiver_untrack_summary_cmd(ctx: commands.Context, key: str, *, pattern: str):
+    """Remove a summary pattern from receiver's include list."""
+    logger.info(f"Receiver untrack summary command from {ctx.author}: {key} -= {pattern}")
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_receiver_config_list(key, "summaryIncludePatterns", remove=vals)
+    if ok:
+        await ctx.reply(f"Removed summary pattern(s) from receiver `{key}`: `{vals}`\n`summaryIncludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_group.group(name="unignore",
+                      invoke_without_command=True,
+                      description="Remove from receiver exclude filters")
+@commands.check(is_bot_owner)
+async def receiver_unignore_group(ctx: commands.Context):
+    """`/receiver unignore` (no subcommand) -> show usage."""
+    await ctx.reply("Usage: `/receiver unignore page|user|summary <key> <value>`")
+
+
+@receiver_unignore_group.command(name="page",
+                                 description="Remove a page pattern from receiver exclude list")
+@commands.check(is_bot_owner)
+async def receiver_unignore_page_cmd(ctx: commands.Context, key: str, *, pattern: str):
+    """Remove a page pattern from receiver's exclude list."""
+    logger.info(f"Receiver unignore page command from {ctx.author}: {key} -= {pattern}")
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_receiver_config_list(key, "pageExcludePatterns", remove=vals)
+    if ok:
+        await ctx.reply(f"Removed page exclude pattern(s) from receiver `{key}`: `{vals}`\n`pageExcludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_unignore_group.command(name="user",
+                                 description="Remove a user from receiver exclude list")
+@commands.check(is_bot_owner)
+async def receiver_unignore_user_cmd(ctx: commands.Context, key: str, *, username: str):
+    """Remove a user from receiver's exclude list."""
+    logger.info(f"Receiver unignore user command from {ctx.author}: {key} -= {username}")
+    vals = _normalise_list_val(username)
+    ok, new_list = await mutate_receiver_config_list(key, "userExcludeList", remove=vals)
+    if ok:
+        await ctx.reply(f"Removed user(s) from receiver `{key}` exclude list: `{vals}`\n`userExcludeList`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
+
+
+@receiver_unignore_group.command(name="summary",
+                                 description="Remove a summary pattern from receiver exclude list")
+@commands.check(is_bot_owner)
+async def receiver_unignore_summary_cmd(ctx: commands.Context, key: str, *, pattern: str):
+    """Remove a summary pattern from receiver's exclude list."""
+    logger.info(f"Receiver unignore summary command from {ctx.author}: {key} -= {pattern}")
+    vals = _normalise_list_val(pattern)
+    ok, new_list = await mutate_receiver_config_list(key, "summaryExcludePatterns", remove=vals)
+    if ok:
+        await ctx.reply(f"Removed summary exclude pattern(s) from receiver `{key}`: `{vals}`\n`summaryExcludePatterns`: `{new_list}`")
+    else:
+        await ctx.reply(f"Receiver `{key}` not found.")
 
 
 # --------------------------------------------------------------------------- #
