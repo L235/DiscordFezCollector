@@ -14,6 +14,8 @@ fez_collector - Discord edition
 * `FEZ_COLLECTOR_CHANNEL_ID`   - Parent channel ID for threads (required)
 * `USER_AGENT`                 - (optional) UA for Wikimedia requests. Default: "DiscordFezCollector/1.0 (https://github.com/L235/DiscordFezCollector; User:L235)"
 * `FEZ_COLLECTOR_STATE`        - Path to config JSON file (default: "./state/config.json")
+* `FEZ_WEBHOOKS` - Comma-separated webhook mappings: "key1=https://...,key2=https://..."
+# `FEZ_OWNER_ID` - Discord ID of the bot owner
 
 **Available Commands (preferred -> legacy):**
 * `/thread <name>` (`!addcustom`) - Create a generic filter thread (parent channel only)
@@ -60,9 +62,6 @@ fez_collector - Discord edition
               }
           }
       }
-
-**Environment Variables (new):**
-* `FEZ_WEBHOOKS` - Comma-separated webhook mappings: "key1=https://...,key2=https://..."
 """
 VERSION = "0.9-webhooks"
 
@@ -174,6 +173,7 @@ class EventStreamConfig:
 
 DISCORD_TOKEN      = os.getenv("FEZ_COLLECTOR_DISCORD_TOKEN")
 DISCORD_CHANNEL_ID = int(os.getenv("FEZ_COLLECTOR_CHANNEL_ID", "0"))  # numeric
+OWNER_ID           = int(os.getenv("FEZ_OWNER_ID", "0"))
 STATE_FILE         = Path(os.getenv("FEZ_COLLECTOR_STATE", "./state/config.json"))
 STALENESS_SECS     = 2 * 60 * 60  # two hours
 
@@ -819,21 +819,21 @@ def format_change(change: dict) -> str:
 async def eventstream_health_monitor():
     """
     Monitor the health of the EventStream connection.
-    If no events are received within EVENTSTREAM_TIMEOUT_SECS, assume the
+    If no events are received within EventStreamConfig.TIMEOUT_SECS, assume the
     connection is dead and terminate the process for external restart.
     """
     global last_event_time
     
     logger.info(
-        f"EventStream health monitor started (timeout: {EVENTSTREAM_TIMEOUT_SECS}s, "
-        f"check interval: {EVENTSTREAM_CHECK_INTERVAL_SECS}s)"
+        f"EventStream health monitor started (timeout: {EventStreamConfig.TIMEOUT_SECS}s, "
+        f"check interval: {EventStreamConfig.CHECK_INTERVAL_SECS}s)"
     )
     
     # Give the stream some time to initialize before monitoring
-    await asyncio.sleep(EVENTSTREAM_CHECK_INTERVAL_SECS)
+    await asyncio.sleep(EventStreamConfig.CHECK_INTERVAL_SECS)
     
     while True:
-        await asyncio.sleep(EVENTSTREAM_CHECK_INTERVAL_SECS)
+        await asyncio.sleep(EventStreamConfig.CHECK_INTERVAL_SECS)
         
         if last_event_time is None:
             logger.warning("EventStream health check: No events received yet")
@@ -841,10 +841,10 @@ async def eventstream_health_monitor():
         
         time_since_last_event = time.time() - last_event_time
         
-        if time_since_last_event > EVENTSTREAM_TIMEOUT_SECS:
+        if time_since_last_event > EventStreamConfig.TIMEOUT_SECS:
             logger.error(
                 f"EventStream TIMEOUT: No events received for {time_since_last_event:.0f}s "
-                f"(threshold: {EVENTSTREAM_TIMEOUT_SECS}s). Terminating process for restart."
+                f"(threshold: {EventStreamConfig.TIMEOUT_SECS}s). Terminating process for restart."
             )
             # Terminate the process - external process manager should restart it
             os.kill(os.getpid(), signal.SIGTERM)
@@ -1151,11 +1151,8 @@ _health_monitor_task: Optional[asyncio.Task] = None
 # --------------------------------------------------------------------------- #
 
 def authorised(ctx) -> bool:
-    """Gatekeeper: only allow guild moderators or the bot owner."""
-    return ctx.author.guild_permissions.manage_guild or ctx.author.id == bot.owner_id
-
-
-
+    """Gatekeeper: only allow the bot owner."""
+    return ctx.author.id == OWNER_ID
 
 
 @bot.hybrid_command(name="fezhelp",
@@ -1843,7 +1840,7 @@ async def status_cmd(ctx: commands.Context):
 
 def is_bot_owner(ctx) -> bool:
     """Check if user is the bot owner."""
-    return ctx.author.id == bot.owner_id
+    return ctx.author.id == OWNER_ID
 
 
 @bot.hybrid_group(name="receiver",
