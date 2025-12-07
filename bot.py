@@ -530,6 +530,10 @@ async def mutate_custom_thread_config_list(thread_id: int, key: str, *, add: Opt
 # --------------------------------------------------------------------------- #
 # ── Receiver (webhook) helpers                                                #
 # --------------------------------------------------------------------------- #
+# NOTE: These functions closely mirror the thread helpers above. A future
+# refactor could extract a generic "target" abstraction to reduce duplication,
+# but the current explicit approach is readable and the duplication is modest.
+# --------------------------------------------------------------------------- #
 
 def _validate_receiver_key(key: str) -> bool:
     """Validate receiver key format: alphanumeric + underscores only."""
@@ -1069,10 +1073,10 @@ async def stream_worker(channel: discord.TextChannel):
 
         # ----------  (#2) ultra-cheap global short-circuit ---------------- #
         # Combine filters from both threads and receivers for fast-reject
-        all_filters = [(None, f) for _, f in customs] + [(None, f) for _, f in receivers]
-        user_whitelist  = {u for _, f in all_filters for u in f.user_include}
-        page_regexes    = [f.page_include for _, f in all_filters if f.page_include]
-        summary_regexes = [f.sum_include for _, f in all_filters if f.sum_include]
+        all_filters = [f for _, f in customs] + [f for _, f in receivers]
+        user_whitelist  = {u for f in all_filters for u in f.user_include}
+        page_regexes    = [f.page_include for f in all_filters if f.page_include]
+        summary_regexes = [f.sum_include for f in all_filters if f.sum_include]
 
         title   = change.get("title", "")
         comment = change.get("log_action_comment") or change.get("comment") or ""
