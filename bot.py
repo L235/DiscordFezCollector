@@ -65,24 +65,26 @@ fez_collector - Discord edition
 """
 VERSION = "0.9-webhooks"
 
+# Standard library
 import asyncio
 import concurrent.futures
+import io
 import json
-import requests
-import signal
 import logging
 import os
+import re
+import signal
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-import re, io
 from re import RegexFlag, compile, search
 from typing import Any, Dict, List, Optional, Tuple
 
+# Third-party
 import discord
+import requests
 from discord.ext import commands
-
 from pywikibot import Site
 from pywikibot import config as pwb_config
 from pywikibot.comms.eventstreams import EventStreams
@@ -172,17 +174,16 @@ class EventStreamConfig:
 # --------------------------------------------------------------------------- #
 
 DISCORD_TOKEN      = os.getenv("FEZ_COLLECTOR_DISCORD_TOKEN")
-DISCORD_CHANNEL_ID = int(os.getenv("FEZ_COLLECTOR_CHANNEL_ID", "0"))  # numeric
+DISCORD_CHANNEL_ID = int(os.getenv("FEZ_COLLECTOR_CHANNEL_ID", "0"))
 OWNER_ID           = int(os.getenv("FEZ_OWNER_ID", "0"))
 STATE_FILE         = Path(os.getenv("FEZ_COLLECTOR_STATE", "./state/config.json"))
-STALENESS_SECS     = 2 * 60 * 60  # two hours
-
-# Track last event received time
-last_event_time: Optional[float] = None
 USER_AGENT         = os.getenv(
     "USER_AGENT",
     "DiscordFezCollector/1.0 (https://github.com/L235/DiscordFezCollector; User:L235)"
 )
+
+# Processing constants
+STALENESS_SECS = 2 * 60 * 60  # discard events older than 2 hours
 
 if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
     logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
@@ -754,7 +755,7 @@ stream = EventStreams(
 # (no register_filter)
 
 # --------------------------------------------------------------------------- #
-# ── Caches                                                                   #
+# ── Caches & runtime state                                                   #
 # --------------------------------------------------------------------------- #
 
 #  thread_id → (fingerprint, CustomFilter)
@@ -763,6 +764,8 @@ FILTER_CACHE: Dict[int, Tuple[str, "CustomFilter"]] = {}
 THREAD_CACHE: Dict[int, discord.Thread] = {}
 #  receiver_key → (fingerprint, CustomFilter)
 RECEIVER_FILTER_CACHE: Dict[str, Tuple[str, "CustomFilter"]] = {}
+#  Track last event received time (for health monitoring)
+last_event_time: Optional[float] = None
 
 def _fingerprint(cfg: dict) -> str:
     """Deterministic (& cheap) fingerprint for a config dict."""
@@ -820,8 +823,6 @@ async def eventstream_health_monitor():
     If no events are received within EventStreamConfig.TIMEOUT_SECS, assume the
     connection is dead and terminate the process for external restart.
     """
-    global last_event_time
-    
     logger.info(
         f"EventStream health monitor started (timeout: {EventStreamConfig.TIMEOUT_SECS}s, "
         f"check interval: {EventStreamConfig.CHECK_INTERVAL_SECS}s)"
