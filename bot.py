@@ -217,6 +217,9 @@ def parse_webhooks_env() -> Dict[str, str]:
         if not url.startswith("https://"):
             logger.warning(f"Webhook URL must start with https://: {url}")
             continue
+        if not url.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")):
+            logger.warning(f"Webhook URL doesn't match Discord webhook pattern: {url}")
+            continue
         result[key] = url
     if result:
         logger.info(f"Loaded {len(result)} webhook(s) from FEZ_WEBHOOKS: {list(result.keys())}")
