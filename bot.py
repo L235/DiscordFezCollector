@@ -15,7 +15,7 @@ fez_collector - Discord edition
 * `USER_AGENT`                 - (optional) UA for Wikimedia requests. Default: "DiscordFezCollector/1.0 (https://github.com/L235/DiscordFezCollector; User:L235)"
 * `FEZ_COLLECTOR_STATE`        - Path to config JSON file (default: "./state/config.json")
 * `FEZ_WEBHOOKS` - Comma-separated webhook mappings: "key1=https://...,key2=https://..."
-# `FEZ_OWNER_ID` - Discord ID of the bot owner
+* `FEZ_OWNER_ID` - Discord ID of the bot owner
 
 **Available Commands (preferred -> legacy):**
 * `/thread <name>` (`!addcustom`) - Create a generic filter thread (parent channel only)
@@ -226,8 +226,6 @@ WEBHOOKS: Dict[str, str] = parse_webhooks_env()
 # --------------------------------------------------------------------------- #
 # ── Config management                                                        #
 # --------------------------------------------------------------------------- #
-
-
 
 DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
     "siteName": "",
@@ -939,8 +937,8 @@ async def stream_worker(channel: discord.TextChannel):
 
     # ------------------------------------------------------------------ #
     # Consume the blocking EventStreams iterator in a thread-pool so the
-# asyncio event-loop never stalls on network reads.  A bounded queue
-# provides back-pressure if Discord throttles us.
+    # asyncio event-loop never stalls on network reads.  A bounded queue
+    # provides back-pressure if Discord throttles us.
     # ------------------------------------------------------------------ #
     event_queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=EventStreamConfig.QUEUE_MAX_SIZE)
 
@@ -1143,10 +1141,6 @@ async def stream_worker(channel: discord.TextChannel):
         event_queue.task_done()
 
 # --------------------------------------------------------------------------- #
-# Global task references
-# --------------------------------------------------------------------------- #
-_health_monitor_task: Optional[asyncio.Task] = None
-# --------------------------------------------------------------------------- #
 # ── Discord commands                                                         #
 # --------------------------------------------------------------------------- #
 
@@ -1212,9 +1206,6 @@ async def fezhelp_cmd(ctx: commands.Context):
     await ctx.reply(help_text)
 
 
-
-
-
 @bot.hybrid_command(name="userthread",
                     aliases=["add"],
                     description="Create a per-user custom thread and include them",
@@ -1258,7 +1249,6 @@ async def userthread_cmd(ctx: commands.Context, *, user: str):
 # --------------------------------------------------------------------------- #
 # ── Global configuration ("/globalconfig ...")                                 #
 # --------------------------------------------------------------------------- #
-
 
 @bot.hybrid_group(name="globalconfig",
                   invoke_without_command=True,
@@ -1306,9 +1296,6 @@ async def globalconfig_setraw_cmd(ctx: commands.Context):  # noqa: N802
         save_config(CONFIG)
     logger.info("Global configuration replaced successfully")
     await ctx.reply("Global configuration **replaced**.", mention_author=False)
-
-
-
 
 
 # --------------------------------------------------------------------------- #
@@ -1510,7 +1497,6 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
 # --------------------------------------------------------------------------- #
 # ── /config … raw variants (per‑thread)                                     #
 # --------------------------------------------------------------------------- #
-
 
 @config_group.command(name="getraw",
                       description="Download raw JSON configuration for this thread")
