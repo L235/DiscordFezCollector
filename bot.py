@@ -77,6 +77,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from re import RegexFlag, compile, search
 from typing import Any, Dict, List, Optional, Tuple
@@ -1545,258 +1546,107 @@ async def config_setraw_cmd(ctx: commands.Context):
 # ── Tracking shortcut commands                                               #
 # --------------------------------------------------------------------------- #
 
+class FilterType(Enum):
+    PAGE = "page"
+    USER = "user"
+    SUMMARY = "summary"
+
 # Mapping from shortcut target to config key
 _INCLUDE_KEY_MAP = {
-    "page": "pageIncludePatterns",
-    "user": "userIncludeList",
-    "summary": "summaryIncludePatterns",
+    FilterType.PAGE: "pageIncludePatterns",
+    FilterType.USER: "userIncludeList",
+    FilterType.SUMMARY: "summaryIncludePatterns",
 }
 
 _EXCLUDE_KEY_MAP = {
-    "page": "pageExcludePatterns",
-    "user": "userExcludeList",
-    "summary": "summaryExcludePatterns",
+    FilterType.PAGE: "pageExcludePatterns",
+    FilterType.USER: "userExcludeList",
+    FilterType.SUMMARY: "summaryExcludePatterns",
 }
 
 
-@bot.hybrid_group(name="track",
-                  invoke_without_command=True,
-                  description="Add to include filters (shortcut for /config add)",
-                  with_app_command=True)
-async def track_group(ctx: commands.Context):
-    """`/track` (no subcommand) -> show usage."""
-    await ctx.reply("Usage: `/track page|user|summary <value>`")
-
-
-@track_group.command(name="page",
-                     description="Add a page pattern to include")
-async def track_page_cmd(ctx: commands.Context, *, pattern: str):
-    logger.info(f"Track page command from {ctx.author}: {pattern}")
+@bot.hybrid_command(name="track",
+                    description="Add to include filters (shortcut for /config add)",
+                    with_app_command=True)
+@discord.app_commands.describe(target="What to track (page, user, summary)", value="Pattern or username")
+async def track_cmd(ctx: commands.Context, target: FilterType, *, value: str):
+    logger.info(f"Track command from {ctx.author}: {target.value} {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    vals = _normalise_list_val(pattern)
+
+    key = _INCLUDE_KEY_MAP[target]
+    vals = _normalise_list_val(value)
     ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "pageIncludePatterns", add=vals
+        ctx.channel.id, key, add=vals
     )
     if ok:
-        await ctx.reply(f"Now tracking pages matching: `{vals}`\n`pageIncludePatterns`: `{new_list}`")
+        await ctx.reply(f"Now tracking {target.value}: `{vals}`\n`{key}`: `{new_list}`")
     else:
-        await ctx.reply("Failed to add pattern.")
+        await ctx.reply(f"Failed to add {target.value}.")
 
 
-@track_group.command(name="user",
-                     description="Add a user to include")
-async def track_user_cmd(ctx: commands.Context, *, username: str):
-    logger.info(f"Track user command from {ctx.author}: {username}")
+@bot.hybrid_command(name="ignore",
+                    description="Add to exclude filters (shortcut for /config add)",
+                    with_app_command=True)
+@discord.app_commands.describe(target="What to ignore (page, user, summary)", value="Pattern or username")
+async def ignore_cmd(ctx: commands.Context, target: FilterType, *, value: str):
+    logger.info(f"Ignore command from {ctx.author}: {target.value} {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    vals = _normalise_list_val(username)
+
+    key = _EXCLUDE_KEY_MAP[target]
+    vals = _normalise_list_val(value)
     ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "userIncludeList", add=vals
+        ctx.channel.id, key, add=vals
     )
     if ok:
-        await ctx.reply(f"Now tracking user(s): `{vals}`\n`userIncludeList`: `{new_list}`")
+        await ctx.reply(f"Now ignoring {target.value}: `{vals}`\n`{key}`: `{new_list}`")
     else:
-        await ctx.reply("Failed to add user.")
+        await ctx.reply(f"Failed to ignore {target.value}.")
 
 
-@track_group.command(name="summary",
-                     description="Add a summary pattern to include")
-async def track_summary_cmd(ctx: commands.Context, *, pattern: str):
-    logger.info(f"Track summary command from {ctx.author}: {pattern}")
+@bot.hybrid_command(name="untrack",
+                    description="Remove from include filters (shortcut for /config remove)",
+                    with_app_command=True)
+@discord.app_commands.describe(target="What to remove (page, user, summary)", value="Pattern or username")
+async def untrack_cmd(ctx: commands.Context, target: FilterType, *, value: str):
+    logger.info(f"Untrack command from {ctx.author}: {target.value} {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    vals = _normalise_list_val(pattern)
+
+    key = _INCLUDE_KEY_MAP[target]
+    vals = _normalise_list_val(value)
     ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "summaryIncludePatterns", add=vals
+        ctx.channel.id, key, remove=vals
     )
     if ok:
-        await ctx.reply(f"Now tracking summaries matching: `{vals}`\n`summaryIncludePatterns`: `{new_list}`")
+        await ctx.reply(f"Removed {target.value}: `{vals}`\n`{key}`: `{new_list}`")
     else:
-        await ctx.reply("Failed to add pattern.")
+        await ctx.reply(f"Failed to remove {target.value}.")
 
 
-@bot.hybrid_group(name="ignore",
-                  invoke_without_command=True,
-                  description="Add to exclude filters (shortcut for /config add)",
-                  with_app_command=True)
-async def ignore_group(ctx: commands.Context):
-    """`/ignore` (no subcommand) -> show usage."""
-    await ctx.reply("Usage: `/ignore page|user|summary <value>`")
-
-
-@ignore_group.command(name="page",
-                      description="Add a page pattern to exclude")
-async def ignore_page_cmd(ctx: commands.Context, *, pattern: str):
-    logger.info(f"Ignore page command from {ctx.author}: {pattern}")
+@bot.hybrid_command(name="unignore",
+                    description="Remove from exclude filters (shortcut for /config remove)",
+                    with_app_command=True)
+@discord.app_commands.describe(target="What to remove (page, user, summary)", value="Pattern or username")
+async def unignore_cmd(ctx: commands.Context, target: FilterType, *, value: str):
+    logger.info(f"Unignore command from {ctx.author}: {target.value} {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    vals = _normalise_list_val(pattern)
+
+    key = _EXCLUDE_KEY_MAP[target]
+    vals = _normalise_list_val(value)
     ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "pageExcludePatterns", add=vals
+        ctx.channel.id, key, remove=vals
     )
     if ok:
-        await ctx.reply(f"Now ignoring pages matching: `{vals}`\n`pageExcludePatterns`: `{new_list}`")
+        await ctx.reply(f"Removed {target.value} from exclude list: `{vals}`\n`{key}`: `{new_list}`")
     else:
-        await ctx.reply("Failed to add pattern.")
-
-
-@ignore_group.command(name="user",
-                      description="Add a user to exclude")
-async def ignore_user_cmd(ctx: commands.Context, *, username: str):
-    logger.info(f"Ignore user command from {ctx.author}: {username}")
-    entry = await _require_custom_thread(ctx)
-    if not entry:
-        return
-    vals = _normalise_list_val(username)
-    ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "userExcludeList", add=vals
-    )
-    if ok:
-        await ctx.reply(f"Now ignoring user(s): `{vals}`\n`userExcludeList`: `{new_list}`")
-    else:
-        await ctx.reply("Failed to add user.")
-
-
-@ignore_group.command(name="summary",
-                      description="Add a summary pattern to exclude")
-async def ignore_summary_cmd(ctx: commands.Context, *, pattern: str):
-    logger.info(f"Ignore summary command from {ctx.author}: {pattern}")
-    entry = await _require_custom_thread(ctx)
-    if not entry:
-        return
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "summaryExcludePatterns", add=vals
-    )
-    if ok:
-        await ctx.reply(f"Now ignoring summaries matching: `{vals}`\n`summaryExcludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply("Failed to add pattern.")
-
-
-@bot.hybrid_group(name="untrack",
-                  invoke_without_command=True,
-                  description="Remove from include filters (shortcut for /config remove)",
-                  with_app_command=True)
-async def untrack_group(ctx: commands.Context):
-    """`/untrack` (no subcommand) -> show usage."""
-    await ctx.reply("Usage: `/untrack page|user|summary <value>`")
-
-
-@untrack_group.command(name="page",
-                       description="Remove a page pattern from include list")
-async def untrack_page_cmd(ctx: commands.Context, *, pattern: str):
-    logger.info(f"Untrack page command from {ctx.author}: {pattern}")
-    entry = await _require_custom_thread(ctx)
-    if not entry:
-        return
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "pageIncludePatterns", remove=vals
-    )
-    if ok:
-        await ctx.reply(f"Removed page pattern(s): `{vals}`\n`pageIncludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply("Failed to remove pattern.")
-
-
-@untrack_group.command(name="user",
-                       description="Remove a user from include list")
-async def untrack_user_cmd(ctx: commands.Context, *, username: str):
-    logger.info(f"Untrack user command from {ctx.author}: {username}")
-    entry = await _require_custom_thread(ctx)
-    if not entry:
-        return
-    vals = _normalise_list_val(username)
-    ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "userIncludeList", remove=vals
-    )
-    if ok:
-        await ctx.reply(f"Removed user(s): `{vals}`\n`userIncludeList`: `{new_list}`")
-    else:
-        await ctx.reply("Failed to remove user.")
-
-
-@untrack_group.command(name="summary",
-                       description="Remove a summary pattern from include list")
-async def untrack_summary_cmd(ctx: commands.Context, *, pattern: str):
-    logger.info(f"Untrack summary command from {ctx.author}: {pattern}")
-    entry = await _require_custom_thread(ctx)
-    if not entry:
-        return
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "summaryIncludePatterns", remove=vals
-    )
-    if ok:
-        await ctx.reply(f"Removed summary pattern(s): `{vals}`\n`summaryIncludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply("Failed to remove pattern.")
-
-
-@bot.hybrid_group(name="unignore",
-                  invoke_without_command=True,
-                  description="Remove from exclude filters (shortcut for /config remove)",
-                  with_app_command=True)
-async def unignore_group(ctx: commands.Context):
-    """`/unignore` (no subcommand) -> show usage."""
-    await ctx.reply("Usage: `/unignore page|user|summary <value>`")
-
-
-@unignore_group.command(name="page",
-                        description="Remove a page pattern from exclude list")
-async def unignore_page_cmd(ctx: commands.Context, *, pattern: str):
-    logger.info(f"Unignore page command from {ctx.author}: {pattern}")
-    entry = await _require_custom_thread(ctx)
-    if not entry:
-        return
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "pageExcludePatterns", remove=vals
-    )
-    if ok:
-        await ctx.reply(f"Removed page exclude pattern(s): `{vals}`\n`pageExcludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply("Failed to remove pattern.")
-
-
-@unignore_group.command(name="user",
-                        description="Remove a user from exclude list")
-async def unignore_user_cmd(ctx: commands.Context, *, username: str):
-    logger.info(f"Unignore user command from {ctx.author}: {username}")
-    entry = await _require_custom_thread(ctx)
-    if not entry:
-        return
-    vals = _normalise_list_val(username)
-    ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "userExcludeList", remove=vals
-    )
-    if ok:
-        await ctx.reply(f"Removed user(s) from exclude list: `{vals}`\n`userExcludeList`: `{new_list}`")
-    else:
-        await ctx.reply("Failed to remove user.")
-
-
-@unignore_group.command(name="summary",
-                        description="Remove a summary pattern from exclude list")
-async def unignore_summary_cmd(ctx: commands.Context, *, pattern: str):
-    logger.info(f"Unignore summary command from {ctx.author}: {pattern}")
-    entry = await _require_custom_thread(ctx)
-    if not entry:
-        return
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, "summaryExcludePatterns", remove=vals
-    )
-    if ok:
-        await ctx.reply(f"Removed summary exclude pattern(s): `{vals}`\n`summaryExcludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply("Failed to remove pattern.")
+        await ctx.reply(f"Failed to remove {target.value}.")
 
 
 # --------------------------------------------------------------------------- #
@@ -1954,206 +1804,70 @@ async def receiver_setconfig_cmd(ctx: commands.Context, key: str, config_key: st
 # ── Receiver track/ignore commands                                            #
 # --------------------------------------------------------------------------- #
 
-@receiver_group.group(name="track",
-                      invoke_without_command=True,
-                      description="Add to receiver include filters")
+@receiver_group.command(name="track",
+                        description="Add to receiver include filters")
 @commands.check(is_bot_owner)
-async def receiver_track_group(ctx: commands.Context):
-    """`/receiver track` (no subcommand) -> show usage."""
-    await ctx.reply("Usage: `/receiver track page|user|summary <key> <value>`")
+@discord.app_commands.describe(key="Receiver key", target="What to track (page, user, summary)", value="Pattern or username")
+async def receiver_track_cmd(ctx: commands.Context, key: str, target: FilterType, *, value: str):
+    """Add to receiver's include list."""
+    logger.info(f"Receiver track command from {ctx.author}: {key} {target.value} += {value}")
 
-
-@receiver_track_group.command(name="page",
-                              description="Add a page pattern to receiver include list")
-@commands.check(is_bot_owner)
-async def receiver_track_page_cmd(ctx: commands.Context, key: str, *, pattern: str):
-    """Add a page pattern to receiver's include list."""
-    logger.info(f"Receiver track page command from {ctx.author}: {key} += {pattern}")
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_receiver_config_list(key, "pageIncludePatterns", add=vals)
+    config_key = _INCLUDE_KEY_MAP[target]
+    vals = _normalise_list_val(value)
+    ok, new_list = await mutate_receiver_config_list(key, config_key, add=vals)
     if ok:
-        await ctx.reply(f"Receiver `{key}` now tracking pages: `{vals}`\n`pageIncludePatterns`: `{new_list}`")
+        await ctx.reply(f"Receiver `{key}` now tracking {target.value}: `{vals}`\n`{config_key}`: `{new_list}`")
     else:
         await ctx.reply(f"Receiver `{key}` not found.")
 
 
-@receiver_track_group.command(name="user",
-                              description="Add a user to receiver include list")
+@receiver_group.command(name="ignore",
+                        description="Add to receiver exclude filters")
 @commands.check(is_bot_owner)
-async def receiver_track_user_cmd(ctx: commands.Context, key: str, *, username: str):
-    """Add a user to receiver's include list."""
-    logger.info(f"Receiver track user command from {ctx.author}: {key} += {username}")
-    vals = _normalise_list_val(username)
-    ok, new_list = await mutate_receiver_config_list(key, "userIncludeList", add=vals)
+@discord.app_commands.describe(key="Receiver key", target="What to ignore (page, user, summary)", value="Pattern or username")
+async def receiver_ignore_cmd(ctx: commands.Context, key: str, target: FilterType, *, value: str):
+    """Add to receiver's exclude list."""
+    logger.info(f"Receiver ignore command from {ctx.author}: {key} {target.value} += {value}")
+
+    config_key = _EXCLUDE_KEY_MAP[target]
+    vals = _normalise_list_val(value)
+    ok, new_list = await mutate_receiver_config_list(key, config_key, add=vals)
     if ok:
-        await ctx.reply(f"Receiver `{key}` now tracking user(s): `{vals}`\n`userIncludeList`: `{new_list}`")
+        await ctx.reply(f"Receiver `{key}` now ignoring {target.value}: `{vals}`\n`{config_key}`: `{new_list}`")
     else:
         await ctx.reply(f"Receiver `{key}` not found.")
 
 
-@receiver_track_group.command(name="summary",
-                              description="Add a summary pattern to receiver include list")
+@receiver_group.command(name="untrack",
+                        description="Remove from receiver include filters")
 @commands.check(is_bot_owner)
-async def receiver_track_summary_cmd(ctx: commands.Context, key: str, *, pattern: str):
-    """Add a summary pattern to receiver's include list."""
-    logger.info(f"Receiver track summary command from {ctx.author}: {key} += {pattern}")
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_receiver_config_list(key, "summaryIncludePatterns", add=vals)
+@discord.app_commands.describe(key="Receiver key", target="What to remove (page, user, summary)", value="Pattern or username")
+async def receiver_untrack_cmd(ctx: commands.Context, key: str, target: FilterType, *, value: str):
+    """Remove from receiver's include list."""
+    logger.info(f"Receiver untrack command from {ctx.author}: {key} {target.value} -= {value}")
+
+    config_key = _INCLUDE_KEY_MAP[target]
+    vals = _normalise_list_val(value)
+    ok, new_list = await mutate_receiver_config_list(key, config_key, remove=vals)
     if ok:
-        await ctx.reply(f"Receiver `{key}` now tracking summaries: `{vals}`\n`summaryIncludePatterns`: `{new_list}`")
+        await ctx.reply(f"Removed {target.value} from receiver `{key}`: `{vals}`\n`{config_key}`: `{new_list}`")
     else:
         await ctx.reply(f"Receiver `{key}` not found.")
 
 
-@receiver_group.group(name="ignore",
-                      invoke_without_command=True,
-                      description="Add to receiver exclude filters")
+@receiver_group.command(name="unignore",
+                        description="Remove from receiver exclude filters")
 @commands.check(is_bot_owner)
-async def receiver_ignore_group(ctx: commands.Context):
-    """`/receiver ignore` (no subcommand) -> show usage."""
-    await ctx.reply("Usage: `/receiver ignore page|user|summary <key> <value>`")
+@discord.app_commands.describe(key="Receiver key", target="What to remove (page, user, summary)", value="Pattern or username")
+async def receiver_unignore_cmd(ctx: commands.Context, key: str, target: FilterType, *, value: str):
+    """Remove from receiver's exclude list."""
+    logger.info(f"Receiver unignore command from {ctx.author}: {key} {target.value} -= {value}")
 
-
-@receiver_ignore_group.command(name="page",
-                               description="Add a page pattern to receiver exclude list")
-@commands.check(is_bot_owner)
-async def receiver_ignore_page_cmd(ctx: commands.Context, key: str, *, pattern: str):
-    """Add a page pattern to receiver's exclude list."""
-    logger.info(f"Receiver ignore page command from {ctx.author}: {key} += {pattern}")
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_receiver_config_list(key, "pageExcludePatterns", add=vals)
+    config_key = _EXCLUDE_KEY_MAP[target]
+    vals = _normalise_list_val(value)
+    ok, new_list = await mutate_receiver_config_list(key, config_key, remove=vals)
     if ok:
-        await ctx.reply(f"Receiver `{key}` now ignoring pages: `{vals}`\n`pageExcludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply(f"Receiver `{key}` not found.")
-
-
-@receiver_ignore_group.command(name="user",
-                               description="Add a user to receiver exclude list")
-@commands.check(is_bot_owner)
-async def receiver_ignore_user_cmd(ctx: commands.Context, key: str, *, username: str):
-    """Add a user to receiver's exclude list."""
-    logger.info(f"Receiver ignore user command from {ctx.author}: {key} += {username}")
-    vals = _normalise_list_val(username)
-    ok, new_list = await mutate_receiver_config_list(key, "userExcludeList", add=vals)
-    if ok:
-        await ctx.reply(f"Receiver `{key}` now ignoring user(s): `{vals}`\n`userExcludeList`: `{new_list}`")
-    else:
-        await ctx.reply(f"Receiver `{key}` not found.")
-
-
-@receiver_ignore_group.command(name="summary",
-                               description="Add a summary pattern to receiver exclude list")
-@commands.check(is_bot_owner)
-async def receiver_ignore_summary_cmd(ctx: commands.Context, key: str, *, pattern: str):
-    """Add a summary pattern to receiver's exclude list."""
-    logger.info(f"Receiver ignore summary command from {ctx.author}: {key} += {pattern}")
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_receiver_config_list(key, "summaryExcludePatterns", add=vals)
-    if ok:
-        await ctx.reply(f"Receiver `{key}` now ignoring summaries: `{vals}`\n`summaryExcludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply(f"Receiver `{key}` not found.")
-
-
-@receiver_group.group(name="untrack",
-                      invoke_without_command=True,
-                      description="Remove from receiver include filters")
-@commands.check(is_bot_owner)
-async def receiver_untrack_group(ctx: commands.Context):
-    """`/receiver untrack` (no subcommand) -> show usage."""
-    await ctx.reply("Usage: `/receiver untrack page|user|summary <key> <value>`")
-
-
-@receiver_untrack_group.command(name="page",
-                                description="Remove a page pattern from receiver include list")
-@commands.check(is_bot_owner)
-async def receiver_untrack_page_cmd(ctx: commands.Context, key: str, *, pattern: str):
-    """Remove a page pattern from receiver's include list."""
-    logger.info(f"Receiver untrack page command from {ctx.author}: {key} -= {pattern}")
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_receiver_config_list(key, "pageIncludePatterns", remove=vals)
-    if ok:
-        await ctx.reply(f"Removed page pattern(s) from receiver `{key}`: `{vals}`\n`pageIncludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply(f"Receiver `{key}` not found.")
-
-
-@receiver_untrack_group.command(name="user",
-                                description="Remove a user from receiver include list")
-@commands.check(is_bot_owner)
-async def receiver_untrack_user_cmd(ctx: commands.Context, key: str, *, username: str):
-    """Remove a user from receiver's include list."""
-    logger.info(f"Receiver untrack user command from {ctx.author}: {key} -= {username}")
-    vals = _normalise_list_val(username)
-    ok, new_list = await mutate_receiver_config_list(key, "userIncludeList", remove=vals)
-    if ok:
-        await ctx.reply(f"Removed user(s) from receiver `{key}`: `{vals}`\n`userIncludeList`: `{new_list}`")
-    else:
-        await ctx.reply(f"Receiver `{key}` not found.")
-
-
-@receiver_untrack_group.command(name="summary",
-                                description="Remove a summary pattern from receiver include list")
-@commands.check(is_bot_owner)
-async def receiver_untrack_summary_cmd(ctx: commands.Context, key: str, *, pattern: str):
-    """Remove a summary pattern from receiver's include list."""
-    logger.info(f"Receiver untrack summary command from {ctx.author}: {key} -= {pattern}")
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_receiver_config_list(key, "summaryIncludePatterns", remove=vals)
-    if ok:
-        await ctx.reply(f"Removed summary pattern(s) from receiver `{key}`: `{vals}`\n`summaryIncludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply(f"Receiver `{key}` not found.")
-
-
-@receiver_group.group(name="unignore",
-                      invoke_without_command=True,
-                      description="Remove from receiver exclude filters")
-@commands.check(is_bot_owner)
-async def receiver_unignore_group(ctx: commands.Context):
-    """`/receiver unignore` (no subcommand) -> show usage."""
-    await ctx.reply("Usage: `/receiver unignore page|user|summary <key> <value>`")
-
-
-@receiver_unignore_group.command(name="page",
-                                 description="Remove a page pattern from receiver exclude list")
-@commands.check(is_bot_owner)
-async def receiver_unignore_page_cmd(ctx: commands.Context, key: str, *, pattern: str):
-    """Remove a page pattern from receiver's exclude list."""
-    logger.info(f"Receiver unignore page command from {ctx.author}: {key} -= {pattern}")
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_receiver_config_list(key, "pageExcludePatterns", remove=vals)
-    if ok:
-        await ctx.reply(f"Removed page exclude pattern(s) from receiver `{key}`: `{vals}`\n`pageExcludePatterns`: `{new_list}`")
-    else:
-        await ctx.reply(f"Receiver `{key}` not found.")
-
-
-@receiver_unignore_group.command(name="user",
-                                 description="Remove a user from receiver exclude list")
-@commands.check(is_bot_owner)
-async def receiver_unignore_user_cmd(ctx: commands.Context, key: str, *, username: str):
-    """Remove a user from receiver's exclude list."""
-    logger.info(f"Receiver unignore user command from {ctx.author}: {key} -= {username}")
-    vals = _normalise_list_val(username)
-    ok, new_list = await mutate_receiver_config_list(key, "userExcludeList", remove=vals)
-    if ok:
-        await ctx.reply(f"Removed user(s) from receiver `{key}` exclude list: `{vals}`\n`userExcludeList`: `{new_list}`")
-    else:
-        await ctx.reply(f"Receiver `{key}` not found.")
-
-
-@receiver_unignore_group.command(name="summary",
-                                 description="Remove a summary pattern from receiver exclude list")
-@commands.check(is_bot_owner)
-async def receiver_unignore_summary_cmd(ctx: commands.Context, key: str, *, pattern: str):
-    """Remove a summary pattern from receiver's exclude list."""
-    logger.info(f"Receiver unignore summary command from {ctx.author}: {key} -= {pattern}")
-    vals = _normalise_list_val(pattern)
-    ok, new_list = await mutate_receiver_config_list(key, "summaryExcludePatterns", remove=vals)
-    if ok:
-        await ctx.reply(f"Removed summary exclude pattern(s) from receiver `{key}`: `{vals}`\n`summaryExcludePatterns`: `{new_list}`")
+        await ctx.reply(f"Removed {target.value} from receiver `{key}` exclude list: `{vals}`\n`{config_key}`: `{new_list}`")
     else:
         await ctx.reply(f"Receiver `{key}` not found.")
 
