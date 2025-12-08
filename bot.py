@@ -798,10 +798,8 @@ def format_change(change: dict, link_verb_not_page: bool = False) -> str:
         log_comment = change.get("log_action_comment") or comment
         link = f"https://{change.get('server_name','')}/w/index.php?title=Special:Log&logid={change.get('log_id','')}"
         if link_verb_not_page:
-            # Extract action verb from log_comment if present, otherwise use "logged"
-            action_verb = "logged"
-            # log_comment format is typically like "action comment" so we'll use a generic verb
-            return f"**{user}** [{action_verb}](<{link}>) **{title}** {log_comment}"
+            # Use generic "logged" verb for log actions
+            return f"**{user}** [logged](<{link}>) **{title}** {log_comment}"
         return f"**{user}** {log_comment} \n<{link}>"
 
     # For regular edits
