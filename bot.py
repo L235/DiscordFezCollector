@@ -18,8 +18,8 @@ fez_collector - Discord edition
 * `FEZ_OWNER_ID` - Discord ID of the bot owner
 
 **Available Commands (preferred -> legacy):**
-* `/thread <name>` (`!addcustom`) - Create a generic filter thread (parent channel only)
-* `/userthread <Username>` (`!add`) - Create a "User:<Username>" thread **and** add the user to `userIncludeList`
+* `/new thread <name>` (`!addcustom`) - Create a generic filter thread (parent channel only)
+* `/new userthread <Username>` (`!add`) - Create a "User:<Username>" thread **and** add the user to `userIncludeList`
 * `/activate` / `/deactivate` - Toggle activity for the *current thread*
 * `/status` - Show current thread configuration (alias for `/config get`)
 * `/track page|user|summary <value>` - Add to include filters
@@ -1159,8 +1159,8 @@ async def fezhelp_cmd(ctx: commands.Context):
 * `/status` - Show current thread configuration
 
 **Thread Management (run in parent channel):**
-* `/thread <name>` - Create a new tracking thread
-* `/userthread <Username>` - Create a "User:Username" thread and auto-add to userIncludeList
+* `/new thread <name>` - Create a new tracking thread
+* `/new userthread <Username>` - Create a "User:Username" thread and auto-add to userIncludeList
 * `/activate` - Activate current thread
 * `/deactivate` - Deactivate current thread
 
@@ -1198,16 +1198,27 @@ async def fezhelp_cmd(ctx: commands.Context):
 * `summaryIncludePatterns` / `summaryExcludePatterns` - Summary regex patterns
 
 **Legacy Commands (still work):**
-* `!add` (→ `/userthread`), `!addcustom` (→ `/thread`), `!activate`, `!deactivate`, `!config`"""
+* `!add` (→ `/new userthread`), `!addcustom` (→ `/new thread`), `!activate`, `!deactivate`, `!config`"""
 
     await ctx.reply(help_text)
 
 
-@bot.hybrid_command(name="userthread",
-                    aliases=["add"],
-                    description="Create a per-user custom thread and include them",
-                    with_app_command=True)
-async def userthread_cmd(ctx: commands.Context, *, user: str):
+@bot.hybrid_group(name="new",
+                  invoke_without_command=True,
+                  description="Create new threads",
+                  with_app_command=True)
+async def new_group(ctx: commands.Context):
+    """`/new` (no subcommand) -> show usage."""
+    await ctx.reply(
+        "**New Thread Commands:**\n"
+        "* `/new thread <name>` - Create a custom filter thread\n"
+        "* `/new userthread <Username>` - Create a User:<Username> thread and auto-add to userIncludeList"
+    )
+
+
+@new_group.command(name="userthread",
+                   description="Create a per-user custom thread and include them")
+async def new_userthread_cmd(ctx: commands.Context, *, user: str):
     """
     Convenience wrapper that creates a User:<username> thread,
     then appends the supplied username to `userIncludeList`.
@@ -1216,7 +1227,7 @@ async def userthread_cmd(ctx: commands.Context, *, user: str):
 
     if ctx.channel.id != DISCORD_CHANNEL_ID:
         logger.warning(f"Userthread command attempted in wrong channel: {ctx.channel.id} (expected {DISCORD_CHANNEL_ID})")
-        await ctx.reply("Run `/userthread` in the parent channel.")
+        await ctx.reply("Run `/new userthread` in the parent channel.")
         return
 
     # create "User:<Username>" thread
@@ -1241,6 +1252,13 @@ async def userthread_cmd(ctx: commands.Context, *, user: str):
         thread.id, "userIncludeList", add=[user]
     )
     await ctx.reply(f"Tracking **{user}** in <#{thread.id}>.\n`userIncludeList`: `{new_list}`")
+
+
+# Legacy text command for backward compatibility with !add
+@bot.command(name="add", hidden=True)
+async def add_legacy_cmd(ctx: commands.Context, *, user: str):
+    """Legacy alias for /new userthread (text command only)."""
+    await ctx.invoke(new_userthread_cmd, user=user)
 
 
 # --------------------------------------------------------------------------- #
@@ -1331,21 +1349,19 @@ def _deepcopy_cfg(obj: Any) -> Any:
         return obj
 
 
-@bot.hybrid_command(name="thread",
-                    aliases=["addcustom"],
-                    description="Create a custom-filter thread (parent channel only)",
-                    with_app_command=True)
-async def thread_cmd(ctx: commands.Context, *, threadname: str = ""):
-    """/thread <threadname> → create a custom filter thread (in parent channel only)."""
+@new_group.command(name="thread",
+                   description="Create a custom-filter thread (parent channel only)")
+async def new_thread_cmd(ctx: commands.Context, *, threadname: str = ""):
+    """/new thread <threadname> → create a custom filter thread (in parent channel only)."""
     logger.info(f"Thread command from {ctx.author} for thread '{threadname}' in {ctx.channel}")
-    
+
     if not _in_parent_channel(ctx):
         logger.warning(f"Thread command attempted in wrong channel: {ctx.channel.id}")
-        await ctx.reply("Use `/thread` in the parent channel.")
+        await ctx.reply("Use `/new thread` in the parent channel.")
         return
     if not threadname.strip():
         logger.warning("Thread command attempted without thread name")
-        await ctx.reply("Please provide a thread name: `/thread <name>`.")
+        await ctx.reply("Please provide a thread name: `/new thread <name>`.")
         return
     try:
         thread = await discord_api_call_with_backoff(
@@ -1364,6 +1380,13 @@ async def thread_cmd(ctx: commands.Context, *, threadname: str = ""):
         return
     await ensure_custom_thread_entry(thread, create_if_missing=True)
     await ctx.reply(f"Thread created: <#{thread.id}> (active). Configure with `/config` inside the thread.")
+
+
+# Legacy text command for backward compatibility with !addcustom
+@bot.command(name="addcustom", hidden=True)
+async def addcustom_legacy_cmd(ctx: commands.Context, *, threadname: str = ""):
+    """Legacy alias for /new thread (text command only)."""
+    await ctx.invoke(new_thread_cmd, threadname=threadname)
 
 
 async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
