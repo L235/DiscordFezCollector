@@ -27,11 +27,11 @@ fez_collector - Discord edition
 * `/untrack page|user|summary <value>` - Remove from include filters
 * `/unignore page|user|summary <value>` - Remove from exclude filters
 * `/globalconfig getraw`  - Download full configuration as a JSON attachment
-* `/globalconfig setraw` - **Replace** the entire configuration from an attached JSON file (**dangerous**)
+* `/globalconfig setraw [attachment]` - **Replace** the entire configuration from an attached JSON file (**dangerous**)
 * `/config [get]` - Show current thread configuration
 * `/config set <key> <json>` - Set configuration value
 * `/config getraw` - Download raw JSON for the current thread
-* `/config setraw` - **Replace** the current thread configuration from an attached JSON file (**dangerous**)
+* `/config setraw [attachment]` - **Replace** the current thread configuration from an attached JSON file (**dangerous**)
 * `/config add|remove|clear ...` - Mutate list-type configuration fields
 
 **Config Schema (v0.9):**
@@ -1171,7 +1171,7 @@ async def fezhelp_cmd(ctx: commands.Context):
 
 **Global Configuration:**
 * `/globalconfig getraw` - Download full configuration as JSON
-* `/globalconfig setraw` - Replace configuration from attached JSON file (DANGEROUS)
+* `/globalconfig setraw [attachment]` - Replace configuration from attached JSON file (DANGEROUS)
 
 **Advanced Thread Configuration:**
 * `/config` - Show current thread configuration (same as `/status`)
@@ -1180,7 +1180,7 @@ async def fezhelp_cmd(ctx: commands.Context):
 * `/config remove <key> <value>` - Remove from list configuration
 * `/config clear <key>` - Clear list configuration
 * `/config getraw` - Download raw JSON for current thread
-* `/config setraw` - Replace current-thread configuration from attached JSON (DANGEROUS)
+* `/config setraw [attachment]` - Replace current-thread configuration from attached JSON (DANGEROUS)
 
 **Receiver Commands (owner only - for webhook feeds):**
 * `/receiver list` - List all receivers
@@ -1270,14 +1270,18 @@ async def globalconfig_getraw_cmd(ctx: commands.Context):  # noqa: N802
 @globalconfig_group.command(name="setraw",
                             description="Replace configuration from attached JSON (DANGEROUS)")
 @commands.check(authorised)
-async def globalconfig_setraw_cmd(ctx: commands.Context):  # noqa: N802
+async def globalconfig_setraw_cmd(ctx: commands.Context, attachment: discord.Attachment = None):  # noqa: N802
     logger.warning(f"Global config setraw command from {ctx.author} - DANGEROUS OPERATION")
     
-    if not ctx.message.attachments:
-        logger.warning("Global config setraw attempted without attachment")
-        await ctx.reply("Attach a **JSON** file to `/globalconfig setraw`.", mention_author=False)
-        return
-    attachment = ctx.message.attachments[0]
+    # Handle both slash command (attachment parameter) and message command (ctx.message.attachments)
+    if attachment is None:
+        # Legacy message command path
+        if not ctx.message.attachments:
+            logger.warning("Global config setraw attempted without attachment")
+            await ctx.reply("Attach a **JSON** file to `/globalconfig setraw`.", mention_author=False)
+            return
+        attachment = ctx.message.attachments[0]
+    
     try:
         raw = await attachment.read()
         new_cfg = json.loads(raw)
@@ -1511,18 +1515,21 @@ async def config_getraw_cmd(ctx: commands.Context):
 @config_group.command(name="setraw",
                       description="Replace this thread's configuration from attached JSON (DANGEROUS)")
 @commands.check(authorised)
-async def config_setraw_cmd(ctx: commands.Context):
+async def config_setraw_cmd(ctx: commands.Context, attachment: discord.Attachment = None):
     logger.warning(f"Config setraw command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
 
-    if not ctx.message.attachments:
-        await ctx.reply("Attach a **JSON** file to `/config setraw`.",
-                        mention_author=False)
-        return
+    # Handle both slash command (attachment parameter) and message command (ctx.message.attachments)
+    if attachment is None:
+        # Legacy message command path
+        if not ctx.message.attachments:
+            await ctx.reply("Attach a **JSON** file to `/config setraw`.",
+                            mention_author=False)
+            return
+        attachment = ctx.message.attachments[0]
 
-    attachment = ctx.message.attachments[0]
     try:
         raw = await attachment.read()
         new_cfg = json.loads(raw)
