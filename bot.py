@@ -1581,7 +1581,7 @@ async def track_cmd(ctx: commands.Context, target: FilterType, *, value: str):
         ctx.channel.id, key, add=vals
     )
     if ok:
-        await ctx.reply(f"Now tracking {target.value}(s): `{vals}`\n`{key}`: `{new_list}`")
+        await ctx.reply(f"Now tracking {target.value}: `{vals}`\n`{key}`: `{new_list}`")
     else:
         await ctx.reply(f"Failed to add {target.value}.")
 
@@ -1602,9 +1602,9 @@ async def ignore_cmd(ctx: commands.Context, target: FilterType, *, value: str):
         ctx.channel.id, key, add=vals
     )
     if ok:
-        await ctx.reply(f"Now ignoring {target.value}(s): `{vals}`\n`{key}`: `{new_list}`")
+        await ctx.reply(f"Now ignoring {target.value}: `{vals}`\n`{key}`: `{new_list}`")
     else:
-        await ctx.reply(f"Failed to add {target.value}.")
+        await ctx.reply(f"Failed to ignore {target.value}.")
 
 
 @bot.hybrid_command(name="untrack",
@@ -1623,7 +1623,7 @@ async def untrack_cmd(ctx: commands.Context, target: FilterType, *, value: str):
         ctx.channel.id, key, remove=vals
     )
     if ok:
-        await ctx.reply(f"Removed {target.value}(s): `{vals}`\n`{key}`: `{new_list}`")
+        await ctx.reply(f"Removed {target.value}: `{vals}`\n`{key}`: `{new_list}`")
     else:
         await ctx.reply(f"Failed to remove {target.value}.")
 
@@ -1644,7 +1644,7 @@ async def unignore_cmd(ctx: commands.Context, target: FilterType, *, value: str)
         ctx.channel.id, key, remove=vals
     )
     if ok:
-        await ctx.reply(f"Removed {target.value}(s) from exclude list: `{vals}`\n`{key}`: `{new_list}`")
+        await ctx.reply(f"Removed {target.value} from exclude list: `{vals}`\n`{key}`: `{new_list}`")
     else:
         await ctx.reply(f"Failed to remove {target.value}.")
 
@@ -1816,7 +1816,7 @@ async def receiver_track_cmd(ctx: commands.Context, key: str, target: FilterType
     vals = _normalise_list_val(value)
     ok, new_list = await mutate_receiver_config_list(key, config_key, add=vals)
     if ok:
-        await ctx.reply(f"Receiver `{key}` now tracking {target.value}(s): `{vals}`\n`{config_key}`: `{new_list}`")
+        await ctx.reply(f"Receiver `{key}` now tracking {target.value}: `{vals}`\n`{config_key}`: `{new_list}`")
     else:
         await ctx.reply(f"Receiver `{key}` not found.")
 
@@ -1833,7 +1833,7 @@ async def receiver_ignore_cmd(ctx: commands.Context, key: str, target: FilterTyp
     vals = _normalise_list_val(value)
     ok, new_list = await mutate_receiver_config_list(key, config_key, add=vals)
     if ok:
-        await ctx.reply(f"Receiver `{key}` now ignoring {target.value}(s): `{vals}`\n`{config_key}`: `{new_list}`")
+        await ctx.reply(f"Receiver `{key}` now ignoring {target.value}: `{vals}`\n`{config_key}`: `{new_list}`")
     else:
         await ctx.reply(f"Receiver `{key}` not found.")
 
@@ -1850,7 +1850,7 @@ async def receiver_untrack_cmd(ctx: commands.Context, key: str, target: FilterTy
     vals = _normalise_list_val(value)
     ok, new_list = await mutate_receiver_config_list(key, config_key, remove=vals)
     if ok:
-        await ctx.reply(f"Removed {target.value}(s) from receiver `{key}`: `{vals}`\n`{config_key}`: `{new_list}`")
+        await ctx.reply(f"Removed {target.value} from receiver `{key}`: `{vals}`\n`{config_key}`: `{new_list}`")
     else:
         await ctx.reply(f"Receiver `{key}` not found.")
 
@@ -1867,7 +1867,7 @@ async def receiver_unignore_cmd(ctx: commands.Context, key: str, target: FilterT
     vals = _normalise_list_val(value)
     ok, new_list = await mutate_receiver_config_list(key, config_key, remove=vals)
     if ok:
-        await ctx.reply(f"Removed {target.value}(s) from receiver `{key}` exclude list: `{vals}`\n`{config_key}`: `{new_list}`")
+        await ctx.reply(f"Removed {target.value} from receiver `{key}` exclude list: `{vals}`\n`{config_key}`: `{new_list}`")
     else:
         await ctx.reply(f"Receiver `{key}` not found.")
 
