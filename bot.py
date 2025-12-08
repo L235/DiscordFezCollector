@@ -1275,8 +1275,8 @@ async def globalconfig_setraw_cmd(ctx: commands.Context, attachment: discord.Att
     
     # Handle both slash command (attachment parameter) and message command (ctx.message.attachments)
     if attachment is None:
-        # Legacy message command path
-        if not ctx.message.attachments:
+        # Legacy message command path - check if ctx.message exists and has attachments
+        if ctx.message is None or not ctx.message.attachments:
             logger.warning("Global config setraw attempted without attachment")
             await ctx.reply("Attach a **JSON** file to `/globalconfig setraw`.", mention_author=False)
             return
@@ -1523,8 +1523,8 @@ async def config_setraw_cmd(ctx: commands.Context, attachment: discord.Attachmen
 
     # Handle both slash command (attachment parameter) and message command (ctx.message.attachments)
     if attachment is None:
-        # Legacy message command path
-        if not ctx.message.attachments:
+        # Legacy message command path - check if ctx.message exists and has attachments
+        if ctx.message is None or not ctx.message.attachments:
             await ctx.reply("Attach a **JSON** file to `/config setraw`.",
                             mention_author=False)
             return
