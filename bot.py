@@ -49,7 +49,8 @@ fez_collector - Discord edition
                       "userExcludeList": [],
                       "userIncludeList": ["Username"],
                       "summaryIncludePatterns": [],
-                      "summaryExcludePatterns": []
+                      "summaryExcludePatterns": [],
+                      "linkVerbNotPage": false   # if true, link action verb (e.g. "edited") instead of page title
                   }
               }
           },
@@ -240,6 +241,7 @@ DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
     "userIncludeList": [],
     "summaryIncludePatterns": [],
     "summaryExcludePatterns": [],
+    "linkVerbNotPage": False,
 }
 
 # Config schema (see docstring):
@@ -687,6 +689,7 @@ class CustomFilter:
         "sum_exclude",
         "user_include",
         "user_exclude",
+        "link_verb_not_page",
     )
 
     def __init__(self, cfg: dict):
@@ -697,6 +700,7 @@ class CustomFilter:
         self.sum_exclude = _compile_pattern_list(cfg.get("summaryExcludePatterns", []))
         self.user_include = set(cfg.get("userIncludeList", []))
         self.user_exclude = set(cfg.get("userExcludeList", []))
+        self.link_verb_not_page = bool(cfg.get("linkVerbNotPage", False))
 
     def matches(self, change: dict) -> bool:
         user = change["user"]
@@ -778,8 +782,14 @@ _health_monitor_task: Optional[asyncio.Task] = None
 # ── Message formatting                                                        #
 # --------------------------------------------------------------------------- #
 
-def format_change(change: dict) -> str:
-    """Turn one EventStreams record into a concise Discord message."""
+def format_change(change: dict, link_verb_not_page: bool = False) -> str:
+    """Turn one EventStreams record into a concise Discord message.
+    
+    Args:
+        change: The event change dictionary from EventStreams
+        link_verb_not_page: If True, link the action verb (e.g., "edited") to the diff/log
+                           instead of linking the page title. Default False for backward compatibility.
+    """
     user = change['user']
     title = change.get("title", "(no title)")
     comment = change.get("comment") or "(no summary)"
@@ -787,6 +797,11 @@ def format_change(change: dict) -> str:
     if change["type"] == "log":
         log_comment = change.get("log_action_comment") or comment
         link = f"https://{change.get('server_name','')}/w/index.php?title=Special:Log&logid={change.get('log_id','')}"
+        if link_verb_not_page:
+            # Extract action verb from log_comment if present, otherwise use "logged"
+            action_verb = "logged"
+            # log_comment format is typically like "action comment" so we'll use a generic verb
+            return f"**{user}** [{action_verb}](<{link}>) **{title}** {log_comment}"
         return f"**{user}** {log_comment} \n<{link}>"
 
     # For regular edits
@@ -795,13 +810,21 @@ def format_change(change: dict) -> str:
     # Handle different change types that may or may not have revision info
     if change["type"] == "edit" and "revision" in change:
         diff_url = f"https://{change['server_name']}/w/index.php?diff={change['revision']['new']}"
+        if link_verb_not_page:
+            return f"**{user}** [edited](<{diff_url}>) **{title}** ({comment})"
         return f"**{user}** edited **[{title}](<{page_url}>)** ({comment}) \n<{diff_url}>"
     elif change["type"] == "new":
+        if link_verb_not_page:
+            return f"**{user}** [created](<{page_url}>) **{title}** ({comment})"
         return f"**{user}** created **[{title}](<{page_url}>)** ({comment})"
     elif change["type"] == "categorize":
+        if link_verb_not_page:
+            return f"**{user}** [categorized](<{page_url}>) **{title}** ({comment})"
         return f"**{user}** categorized **[{title}](<{page_url}>)** ({comment})"
     else:
         # Fallback for other change types
+        if link_verb_not_page:
+            return f"**{user}** [modified](<{page_url}>) **{title}** ({comment})"
         return f"**{user}** modified **[{title}](<{page_url}>)** ({comment})"
 
 # --------------------------------------------------------------------------- #
@@ -1054,8 +1077,8 @@ async def stream_worker(channel: discord.TextChannel):
             continue
 
         # Determine routing targets
-        targets: List[discord.abc.Messageable] = []
-        receiver_targets: List[str] = []  # List of receiver keys to send to
+        targets: List[Tuple[discord.abc.Messageable, "CustomFilter"]] = []  # (target, filter)
+        receiver_targets: List[Tuple[str, "CustomFilter"]] = []  # (key, filter)
 
         # Custom threads and receivers
         customs = await active_custom_filters()
@@ -1086,7 +1109,7 @@ async def stream_worker(channel: discord.TextChannel):
                     if filt.matches(change):
                         th = await get_thread_obj(tid)
                         if th is not None:
-                            targets.append(th)
+                            targets.append((th, filt))
                 except Exception as e:  # pragma: no cover
                     logger.warning(f"Custom filter error for {tid}: {e}")
 
@@ -1095,17 +1118,13 @@ async def stream_worker(channel: discord.TextChannel):
             for key, filt in receivers:
                 try:
                     if filt.matches(change):
-                        receiver_targets.append(key)
+                        receiver_targets.append((key, filt))
                 except Exception as e:
                     logger.warning(f"Receiver filter error for '{key}': {e}")
 
         if not targets and not receiver_targets:
             event_queue.task_done()
             continue  # nothing to do
-
-        msg = format_change(change)
-        if len(msg) > DISCORD_MESSAGE_LIMIT:
-            msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
 
         # Send to thread targets with rate limit handling
         if logger.isEnabledFor(logging.DEBUG):
@@ -1114,15 +1133,21 @@ async def stream_worker(channel: discord.TextChannel):
                 len(targets),
                 len(receiver_targets),
             )
-        for tgt in targets:
+        for tgt, filt in targets:
+            msg = format_change(change, link_verb_not_page=filt.link_verb_not_page)
+            if len(msg) > DISCORD_MESSAGE_LIMIT:
+                msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
             await send_message_with_backoff(tgt, msg)
 
         # Send to receiver webhooks (uses discord.py native webhook support)
-        for key in receiver_targets:
+        for key, filt in receiver_targets:
             webhook_url = WEBHOOKS.get(key)
             if not webhook_url:
                 logger.warning(f"Receiver '{key}' matched but no webhook URL")
                 continue
+            msg = format_change(change, link_verb_not_page=filt.link_verb_not_page)
+            if len(msg) > DISCORD_MESSAGE_LIMIT:
+                msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
             try:
                 await send_webhook_with_backoff(webhook_url, msg, key)
             except WebhookError as e:
@@ -1196,6 +1221,7 @@ async def fezhelp_cmd(ctx: commands.Context):
 * `pageIncludePatterns` / `pageExcludePatterns` - Page regex patterns
 * `userIncludeList` / `userExcludeList` - User lists
 * `summaryIncludePatterns` / `summaryExcludePatterns` - Summary regex patterns
+* `linkVerbNotPage` - Boolean (true/false): if true, link action verb (e.g. "edited") instead of page title
 
 **Legacy Commands (still work):**
 * `!add` (→ `/new userthread`), `!addcustom` (→ `/new thread`), `!activate`, `!deactivate`, `!config`"""
