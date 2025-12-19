@@ -111,7 +111,9 @@ _EXCLUDE_KEY_MAP = {
 async def fezhelp_cmd(ctx: commands.Context):
     """Display available commands and their descriptions."""
     logger.info(f"Help command from {ctx.author} in {ctx.channel}")
-    help_text = """**Available Commands:**
+    
+    chunks = [
+        """**Available Commands:**
 
 **Basic Commands:**
 * `/fezhelp` - Show this help message
@@ -121,9 +123,9 @@ async def fezhelp_cmd(ctx: commands.Context):
 * `/new thread <name>` - Create a new tracking thread
 * `/new userthread <Username>` - Create a "User:Username" thread and auto-add to userIncludeList
 * `/activate` - Activate current thread
-* `/deactivate` - Deactivate current thread
+* `/deactivate` - Deactivate current thread""",
 
-**Tracking Shortcuts (run inside a thread):**
+        """**Tracking Shortcuts (run inside a thread):**
 * `/track page|user|summary <value>` - Add to include filters
 * `/ignore page|user|summary <value>` - Add to exclude filters
 * `/untrack page|user|summary <value>` - Remove from include filters
@@ -131,18 +133,18 @@ async def fezhelp_cmd(ctx: commands.Context):
 
 **Global Configuration:**
 * `/globalconfig getraw` - Download full configuration as JSON
-* `/globalconfig setraw [attachment]` - Replace configuration from attached JSON file (DANGEROUS)
+* `/globalconfig setraw [attachment]` - Replace configuration from attached JSON file (DANGEROUS)""",
 
-**Advanced Thread Configuration:**
+        """**Advanced Thread Configuration:**
 * `/config` - Show current thread configuration (same as `/status`)
 * `/config set <key> <json>` - Set configuration value
 * `/config add <key> <value>` - Add to list configuration
 * `/config remove <key> <value>` - Remove from list configuration
 * `/config clear <key>` - Clear list configuration
 * `/config getraw` - Download raw JSON for current thread
-* `/config setraw [attachment]` - Replace current-thread configuration from attached JSON (DANGEROUS)
+* `/config setraw [attachment]` - Replace current-thread configuration from attached JSON (DANGEROUS)""",
 
-**Receiver Commands (owner only - for webhook feeds):**
+        """**Receiver Commands (owner only - for webhook feeds):**
 * `/receiver list` - List all receivers
 * `/receiver add <key> <name>` - Create a new receiver
 * `/receiver remove <key>` - Delete a receiver
@@ -158,8 +160,13 @@ async def fezhelp_cmd(ctx: commands.Context):
 
 **Legacy Commands (still work):**
 * `!add` (→ `/new userthread`), `!addcustom` (→ `/new thread`), `!activate`, `!deactivate`, `!config`"""
+    ]
 
-    await ctx.reply(help_text)
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            await ctx.reply(chunk)
+        else:
+            await ctx.send(chunk)
 
 
 @bot.hybrid_group(name="new",
