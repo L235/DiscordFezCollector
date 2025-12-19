@@ -114,7 +114,7 @@ def format_change(change: dict) -> str:
             if isinstance(log_params, dict) and "log" in log_params:
                 link = f"https://{change.get('server_name','')}/wiki/Special:AbuseLog/{log_params['log']}"
 
-        return f"**{user}** {log_comment} \\n<{link}>"
+        return f"**{user}** {log_comment} \n<{link}>"
 
     # For regular edits
     page_url = f"https://{change['server_name']}/wiki/{title.replace(' ', '_')}"
@@ -122,7 +122,7 @@ def format_change(change: dict) -> str:
     # Handle different change types that may or may not have revision info
     if change["type"] == "edit" and "revision" in change:
         diff_url = f"https://{change['server_name']}/w/index.php?diff={change['revision']['new']}"
-        return f"**{user}** edited **[{title}](<{page_url}>)** ({comment}) \\n<{diff_url}>"
+        return f"**{user}** edited **[{title}](<{page_url}>)** ({comment}) \n<{diff_url}>"
     elif change["type"] == "new":
         return f"**{user}** created **[{title}](<{page_url}>)** ({comment})"
     elif change["type"] == "categorize":
