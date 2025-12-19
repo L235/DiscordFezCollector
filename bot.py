@@ -787,6 +787,13 @@ def format_change(change: dict) -> str:
     if change["type"] == "log":
         log_comment = change.get("log_action_comment") or comment
         link = f"https://{change.get('server_name','')}/w/index.php?title=Special:Log&logid={change.get('log_id','')}"
+
+        # Better linking for AbuseFilter hits
+        if change.get("log_type") == "abusefilter" and change.get("log_action") == "hit":
+            log_params = change.get("log_params")
+            if isinstance(log_params, dict) and "log" in log_params:
+                link = f"https://{change.get('server_name','')}/wiki/Special:AbuseLog/{log_params['log']}"
+
         return f"**{user}** {log_comment} \n<{link}>"
 
     # For regular edits
