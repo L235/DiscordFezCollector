@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
@@ -123,14 +124,6 @@ CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
 def _blank_custom_cfg() -> dict:
     return json.loads(json.dumps(DEFAULT_CUSTOM_CONFIG))  # deep copy
 
-# ... helpers that were in bot.py ...
-# Actually, I should probably move the mutation helpers here too?
-# Or keep them in a separate utils file? 
-# The commands use them. The original bot.py had them as global functions.
-# It makes sense to have them here or in a config_utils.py. 
-# `ensure_custom_thread_entry`, `set_custom_thread_active`, etc. operate on CONFIG.
-# So they belong here.
-
 async def ensure_custom_thread_entry(thread_id: str, thread_name: str, *, create_if_missing: bool = False) -> Optional[dict]:
     """
     Ensure CONFIG entry exists for given thread. Returns entry (dict) or None.
@@ -214,7 +207,6 @@ async def mutate_custom_thread_config_list(thread_id: int, key: str, *, add: Opt
 
 def _validate_receiver_key(key: str) -> bool:
     """Validate receiver key format: alphanumeric + underscores only."""
-    import re
     return bool(re.match(r'^[a-zA-Z0-9_]+$', key))
 
 async def get_receiver_entry(key: str) -> Optional[dict]:

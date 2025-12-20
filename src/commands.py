@@ -24,6 +24,7 @@ from src.config import (
     get_receiver_entry,
     update_receiver_config,
     mutate_receiver_config_list,
+    _normalise_list_val,
     WEBHOOKS,
 )
 from src.discord_utils import discord_api_call_with_backoff
@@ -65,13 +66,6 @@ def _deepcopy_cfg(obj: Any) -> Any:
     except Exception:
         # worst case, return original; caller should treat as immutable
         return obj
-
-def _normalise_list_val(v: Any) -> List[str]:
-    if isinstance(v, str):
-        return [v]
-    if isinstance(v, list):
-        return [str(x) for x in v]
-    return [str(v)]
 
 async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
     if not _in_custom_thread(ctx):

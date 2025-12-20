@@ -1,7 +1,7 @@
 import os
 import re
 from re import RegexFlag, compile, search
-from typing import List, Optional, Any
+from typing import List, Optional
 
 # Timeout and retry configuration (for EventStreams)
 class RetryConfig:

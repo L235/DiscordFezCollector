@@ -57,7 +57,9 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
         f"Discord API call failed after {DiscordRateLimitConfig.MAX_ATTEMPTS} attempts. "
         f"Last error: {last_exception}"
     )
-    raise last_exception
+    if last_exception:
+        raise last_exception
+    raise discord.HTTPException(response=None, message="Max attempts reached with no specific error")
 
 
 async def send_message_with_backoff(target: discord.abc.Messageable, content: str) -> Optional[discord.Message]:
