@@ -18,7 +18,7 @@ from pywikibot.comms.eventstreams import EventStreams
 from src.constants import (
     ISO_TIMESTAMP_FORMAT,
     DISCORD_MESSAGE_LIMIT,
-    TRUNCATION_BUFFER,
+    TRUNCATION_RESERVE,
     TRUNCATED_MESSAGE_SUFFIX,
 )
 from src.logging_setup import logger
@@ -428,7 +428,7 @@ async def stream_worker(channel: discord.TextChannel):
 
         msg = format_change(change)
         if len(msg) > DISCORD_MESSAGE_LIMIT:
-            msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_BUFFER] + TRUNCATED_MESSAGE_SUFFIX
+            msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_RESERVE] + TRUNCATED_MESSAGE_SUFFIX
 
         # Send to thread targets with rate limit handling
         if logger.isEnabledFor(logging.DEBUG):

@@ -8,4 +8,4 @@ JSON_INDENT = 2
 # Discord limits
 DISCORD_MESSAGE_LIMIT = 2000
 TRUNCATED_MESSAGE_SUFFIX = "..."
-TRUNCATION_BUFFER = 10  # 1990 = 2000 - 10
+TRUNCATION_RESERVE = 10  # Reserve space for suffix; max content = 2000 - 10 = 1990

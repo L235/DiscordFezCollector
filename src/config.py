@@ -144,9 +144,9 @@ async def ensure_custom_thread_entry(thread_id: str, thread_name: str, *, create
             save_config(CONFIG)
         return entry
 
-async def set_custom_thread_active(thread_id: int, active: bool) -> bool:
+async def set_custom_thread_active(thread_id: str, active: bool) -> bool:
     async with CONFIG_LOCK:
-        entry = CONFIG["threads"].get(str(thread_id))
+        entry = CONFIG["threads"].get(thread_id)
         if not entry:
             logger.warning(f"Attempted to set active state for unknown thread {thread_id}")
             return False
@@ -156,9 +156,9 @@ async def set_custom_thread_active(thread_id: int, active: bool) -> bool:
         logger.info(f"Thread {thread_id} active state changed: {old_state} -> {active}")
         return True
 
-async def update_custom_thread_config(thread_id: int, new_cfg: dict) -> bool:
+async def update_custom_thread_config(thread_id: str, new_cfg: dict) -> bool:
     async with CONFIG_LOCK:
-        entry = CONFIG["threads"].get(str(thread_id))
+        entry = CONFIG["threads"].get(thread_id)
         if not entry:
             logger.warning(f"Attempted to update config for unknown thread {thread_id}")
             return False
@@ -174,13 +174,13 @@ def _normalise_list_val(v: Any) -> List[str]:
         return [str(x) for x in v]
     return [str(v)]
 
-async def mutate_custom_thread_config_list(thread_id: int, key: str, *, add: Optional[List[str]] = None,
+async def mutate_custom_thread_config_list(thread_id: str, key: str, *, add: Optional[List[str]] = None,
                                            remove: Optional[List[str]] = None, clear: bool = False) -> Tuple[bool, Optional[List[str]]]:
     """
     Mutate an array field of a custom thread config. Returns (ok, new_list|None).
     """
     async with CONFIG_LOCK:
-        entry = CONFIG["threads"].get(str(thread_id))
+        entry = CONFIG["threads"].get(thread_id)
         if not entry:
             logger.warning(f"Attempted to mutate config for unknown thread {thread_id}")
             return False, None

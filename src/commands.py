@@ -209,7 +209,7 @@ async def new_userthread_cmd(ctx: commands.Context, *, user: str):
 
     await ensure_custom_thread_entry(str(thread.id), thread.name, create_if_missing=True)
     _, new_list = await mutate_custom_thread_config_list(
-        thread.id, "userIncludeList", add=[user]
+        str(thread.id), "userIncludeList", add=[user]
     )
     await ctx.reply(f"Tracking **{user}** in <#{thread.id}>.\n`userIncludeList`: `{new_list}`")
 
@@ -329,7 +329,7 @@ async def activate_custom_thread_cmd(ctx: commands.Context):
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    ok = await set_custom_thread_active(ctx.channel.id, True)
+    ok = await set_custom_thread_active(str(ctx.channel.id), True)
     if ok:
         await ctx.reply("Activated.")
     else:
@@ -345,7 +345,7 @@ async def deactivate_custom_thread_cmd(ctx: commands.Context):
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    ok = await set_custom_thread_active(ctx.channel.id, False)
+    ok = await set_custom_thread_active(str(ctx.channel.id), False)
     if ok:
         await ctx.reply("Deactivated.")
     else:
@@ -384,7 +384,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     # If key unknown, set anyway
     cfg = _deepcopy_cfg(entry["config"])
     cfg[key] = parsed
-    ok = await update_custom_thread_config(ctx.channel.id, cfg)
+    ok = await update_custom_thread_config(str(ctx.channel.id), cfg)
     if ok:
         await ctx.reply(f"Set `{key}`: `{parsed}`")
     else:
@@ -400,7 +400,7 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
     if not entry:
         return
     vals = _normalise_list_val(_parse_json_arg(value))
-    ok, new_list = await mutate_custom_thread_config_list(ctx.channel.id, key, add=vals)
+    ok, new_list = await mutate_custom_thread_config_list(str(ctx.channel.id), key, add=vals)
     if ok:
         await ctx.reply(f"Added to `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
@@ -416,7 +416,7 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
     if not entry:
         return
     vals = _normalise_list_val(_parse_json_arg(value))
-    ok, new_list = await mutate_custom_thread_config_list(ctx.channel.id, key, remove=vals)
+    ok, new_list = await mutate_custom_thread_config_list(str(ctx.channel.id), key, remove=vals)
     if ok:
         await ctx.reply(f"Removed from `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
@@ -431,7 +431,7 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    ok, _ = await mutate_custom_thread_config_list(ctx.channel.id, key, clear=True)
+    ok, _ = await mutate_custom_thread_config_list(str(ctx.channel.id), key, clear=True)
     if ok:
         await ctx.reply(f"Cleared `{key}`.")
     else:
@@ -485,7 +485,7 @@ async def config_setraw_cmd(ctx: commands.Context, attachment: discord.Attachmen
                         mention_author=False)
         return
 
-    ok = await update_custom_thread_config(ctx.channel.id, new_cfg)
+    ok = await update_custom_thread_config(str(ctx.channel.id), new_cfg)
     if ok:
         await ctx.reply("Thread configuration **replaced**.",
                         mention_author=False)
@@ -510,7 +510,7 @@ async def track_cmd(ctx: commands.Context, target: FilterType, *, value: str):
     key = _INCLUDE_KEY_MAP[target]
     vals = _normalise_list_val(value)
     ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, key, add=vals
+        str(ctx.channel.id), key, add=vals
     )
     if ok:
         await ctx.reply(f"Now tracking {target.value}: `{vals}`\n`{key}`: `{new_list}`")
@@ -531,7 +531,7 @@ async def ignore_cmd(ctx: commands.Context, target: FilterType, *, value: str):
     key = _EXCLUDE_KEY_MAP[target]
     vals = _normalise_list_val(value)
     ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, key, add=vals
+        str(ctx.channel.id), key, add=vals
     )
     if ok:
         await ctx.reply(f"Now ignoring {target.value}: `{vals}`\n`{key}`: `{new_list}`")
@@ -552,7 +552,7 @@ async def untrack_cmd(ctx: commands.Context, target: FilterType, *, value: str):
     key = _INCLUDE_KEY_MAP[target]
     vals = _normalise_list_val(value)
     ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, key, remove=vals
+        str(ctx.channel.id), key, remove=vals
     )
     if ok:
         await ctx.reply(f"Removed {target.value}: `{vals}`\n`{key}`: `{new_list}`")
@@ -573,7 +573,7 @@ async def unignore_cmd(ctx: commands.Context, target: FilterType, *, value: str)
     key = _EXCLUDE_KEY_MAP[target]
     vals = _normalise_list_val(value)
     ok, new_list = await mutate_custom_thread_config_list(
-        ctx.channel.id, key, remove=vals
+        str(ctx.channel.id), key, remove=vals
     )
     if ok:
         await ctx.reply(f"Removed {target.value} from exclude list: `{vals}`\n`{key}`: `{new_list}`")
