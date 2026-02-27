@@ -5,7 +5,7 @@ import discord
 from discord.ext import commands
 
 from src.logging_setup import logger
-from src.config import DISCORD_TOKEN, DISCORD_CHANNEL_ID
+from src.config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, validate_env
 from src.bot_instance import bot
 # Import commands to ensure they are registered
 import src.commands 
@@ -82,6 +82,7 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 def main():
+    validate_env()
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)

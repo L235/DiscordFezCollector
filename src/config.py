@@ -26,11 +26,11 @@ USER_AGENT         = os.getenv(
 # Processing constants
 STALENESS_SECS = 2 * 60 * 60  # discard events older than 2 hours
 
-if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
-    logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
-    # We might not want to exit here if we are just importing this module for testing or partial usage
-    # but the original code did exit. Let's keep it for now.
-    sys.exit("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
+def validate_env() -> None:
+    """Validate required environment variables. Call from main(), not at import time."""
+    if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
+        logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
+        sys.exit("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
 
 # --------------------------------------------------------------------------- #
 # ── Webhook URL parsing                                                       #
