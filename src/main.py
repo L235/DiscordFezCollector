@@ -8,7 +8,7 @@ from src.logging_setup import logger
 from src.config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, validate_env
 from src.bot_instance import bot
 # Import commands to ensure they are registered
-import src.commands 
+import src.commands  # noqa: F401 — triggers command registration
 from src.event_streams import stream_worker, eventstream_health_monitor, THREAD_CACHE
 
 # --------------------------------------------------------------------------- #
