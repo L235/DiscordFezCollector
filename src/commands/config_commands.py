@@ -81,6 +81,7 @@ async def config_group(ctx: commands.Context):
 @config_group.command(name="get",
                       description="Show current thread configuration")
 async def config_get_cmd(ctx: commands.Context):
+    logger.info(f"Config get command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -91,6 +92,7 @@ async def config_get_cmd(ctx: commands.Context):
 @config_group.command(name="set",
                       description="Set a configuration key")
 async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
+    logger.info(f"Config set command from {ctx.author} in thread {ctx.channel.id}: {key} = {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -107,6 +109,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
 @config_group.command(name="add",
                       description="Append value(s) to a list key")
 async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
+    logger.info(f"Config add command from {ctx.author} in thread {ctx.channel.id}: {key} += {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -121,6 +124,7 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
 @config_group.command(name="remove",
                       description="Remove value(s) from a list key")
 async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
+    logger.info(f"Config remove command from {ctx.author} in thread {ctx.channel.id}: {key} -= {value}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -135,6 +139,7 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
 @config_group.command(name="clear",
                       description="Clear a list key")
 async def config_clear_cmd(ctx: commands.Context, key: str):
+    logger.info(f"Config clear command from {ctx.author} in thread {ctx.channel.id}: clear {key}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -149,6 +154,7 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
                       description="Download raw JSON configuration for this thread")
 @commands.check(authorised)
 async def config_getraw_cmd(ctx: commands.Context):
+    logger.info(f"Config getraw command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -162,6 +168,7 @@ async def config_getraw_cmd(ctx: commands.Context):
                       description="Replace this thread's configuration from attached JSON (DANGEROUS)")
 @commands.check(authorised)
 async def config_setraw_cmd(ctx: commands.Context, attachment: discord.Attachment = None):
+    logger.warning(f"Config setraw command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -189,6 +196,7 @@ async def config_setraw_cmd(ctx: commands.Context, attachment: discord.Attachmen
                     description="Show current thread configuration",
                     with_app_command=True)
 async def status_cmd(ctx: commands.Context):
+    logger.info(f"Status command from {ctx.author} in thread {ctx.channel.id}")
     entry = await _require_custom_thread(ctx)
     if not entry:
         return

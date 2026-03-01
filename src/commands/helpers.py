@@ -31,7 +31,7 @@ is_bot_owner = authorised
 
 
 def _in_parent_channel(ctx: commands.Context) -> bool:
-    """True when in the parent channel. Ready for #18: accepts set of IDs."""
+    """True when in the parent channel. TODO #18: change to `in` when DISCORD_CHANNEL_ID becomes a set."""
     return ctx.channel.id == DISCORD_CHANNEL_ID
 
 

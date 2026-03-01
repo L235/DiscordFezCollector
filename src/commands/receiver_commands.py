@@ -45,6 +45,7 @@ async def receiver_group(ctx: commands.Context):
 @receiver_group.command(name="list", description="List all receivers")
 @commands.check(is_bot_owner)
 async def receiver_list_cmd(ctx: commands.Context):
+    logger.info(f"Receiver list command from {ctx.author}")
     async with CONFIG_LOCK:
         receivers = CONFIG.get("receivers", {})
     if not receivers:
@@ -65,6 +66,7 @@ async def receiver_list_cmd(ctx: commands.Context):
 @receiver_group.command(name="add", description="Create a new receiver")
 @commands.check(is_bot_owner)
 async def receiver_add_cmd(ctx: commands.Context, key: str, *, name: str):
+    logger.info(f"Receiver add command from {ctx.author}: key={key}, name={name}")
     ok, msg = await create_receiver(key, name)
     await ctx.reply(msg)
 
@@ -72,6 +74,7 @@ async def receiver_add_cmd(ctx: commands.Context, key: str, *, name: str):
 @receiver_group.command(name="remove", description="Delete a receiver")
 @commands.check(is_bot_owner)
 async def receiver_remove_cmd(ctx: commands.Context, key: str):
+    logger.info(f"Receiver remove command from {ctx.author}: key={key}")
     ok, msg = await delete_receiver(key)
     await ctx.reply(msg)
 
@@ -79,6 +82,7 @@ async def receiver_remove_cmd(ctx: commands.Context, key: str):
 @receiver_group.command(name="activate", description="Activate a receiver")
 @commands.check(is_bot_owner)
 async def receiver_activate_cmd(ctx: commands.Context, key: str):
+    logger.info(f"Receiver activate command from {ctx.author}: key={key}")
     ok, msg = await set_receiver_active(key, True)
     await ctx.reply(msg)
 
@@ -86,6 +90,7 @@ async def receiver_activate_cmd(ctx: commands.Context, key: str):
 @receiver_group.command(name="deactivate", description="Deactivate a receiver")
 @commands.check(is_bot_owner)
 async def receiver_deactivate_cmd(ctx: commands.Context, key: str):
+    logger.info(f"Receiver deactivate command from {ctx.author}: key={key}")
     ok, msg = await set_receiver_active(key, False)
     await ctx.reply(msg)
 
@@ -93,6 +98,7 @@ async def receiver_deactivate_cmd(ctx: commands.Context, key: str):
 @receiver_group.command(name="config", description="Show receiver configuration")
 @commands.check(is_bot_owner)
 async def receiver_config_cmd(ctx: commands.Context, key: str):
+    logger.info(f"Receiver config command from {ctx.author}: key={key}")
     entry = await get_receiver_entry(key)
     if not entry:
         await ctx.reply(f"Receiver `{key}` not found.")
@@ -104,6 +110,7 @@ async def receiver_config_cmd(ctx: commands.Context, key: str):
 @receiver_group.command(name="setconfig", description="Set a configuration key for a receiver")
 @commands.check(is_bot_owner)
 async def receiver_setconfig_cmd(ctx: commands.Context, key: str, config_key: str, *, value: str):
+    logger.info(f"Receiver setconfig command from {ctx.author}: {key}.{config_key} = {value}")
     entry = await get_receiver_entry(key)
     if not entry:
         await ctx.reply(f"Receiver `{key}` not found.")
@@ -122,6 +129,7 @@ async def receiver_setconfig_cmd(ctx: commands.Context, key: str, config_key: st
 @commands.check(is_bot_owner)
 @discord.app_commands.describe(key="Receiver key", target="What to track (page, user, summary)", value="Pattern or username")
 async def receiver_track_cmd(ctx: commands.Context, key: str, target: FilterType, *, value: str):
+    logger.info(f"Receiver track command from {ctx.author}: {key} {target.value} += {value}")
     await mutate_filter(ctx, "receivers", key, target, value, action="add_include", entity_label=f"Receiver `{key}`")
 
 
@@ -129,6 +137,7 @@ async def receiver_track_cmd(ctx: commands.Context, key: str, target: FilterType
 @commands.check(is_bot_owner)
 @discord.app_commands.describe(key="Receiver key", target="What to ignore (page, user, summary)", value="Pattern or username")
 async def receiver_ignore_cmd(ctx: commands.Context, key: str, target: FilterType, *, value: str):
+    logger.info(f"Receiver ignore command from {ctx.author}: {key} {target.value} += {value}")
     await mutate_filter(ctx, "receivers", key, target, value, action="add_exclude", entity_label=f"Receiver `{key}`")
 
 
@@ -136,6 +145,7 @@ async def receiver_ignore_cmd(ctx: commands.Context, key: str, target: FilterTyp
 @commands.check(is_bot_owner)
 @discord.app_commands.describe(key="Receiver key", target="What to remove (page, user, summary)", value="Pattern or username")
 async def receiver_untrack_cmd(ctx: commands.Context, key: str, target: FilterType, *, value: str):
+    logger.info(f"Receiver untrack command from {ctx.author}: {key} {target.value} -= {value}")
     await mutate_filter(ctx, "receivers", key, target, value, action="remove_include", entity_label=f"Receiver `{key}`")
 
 
@@ -143,4 +153,5 @@ async def receiver_untrack_cmd(ctx: commands.Context, key: str, target: FilterTy
 @commands.check(is_bot_owner)
 @discord.app_commands.describe(key="Receiver key", target="What to remove (page, user, summary)", value="Pattern or username")
 async def receiver_unignore_cmd(ctx: commands.Context, key: str, target: FilterType, *, value: str):
+    logger.info(f"Receiver unignore command from {ctx.author}: {key} {target.value} -= {value}")
     await mutate_filter(ctx, "receivers", key, target, value, action="remove_exclude", entity_label=f"Receiver `{key}`")
