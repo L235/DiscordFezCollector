@@ -68,6 +68,7 @@ THREAD_CACHE: Dict[int, discord.Thread] = {}
 #  receiver_key → (fingerprint, CustomFilter)
 RECEIVER_FILTER_CACHE: Dict[str, Tuple[str, CustomFilter]] = {}
 #  Track last event received time (for health monitoring)
+_last_event_lock = threading.Lock()
 last_event_time: Optional[float] = None
 
 def _fingerprint(cfg: dict) -> str:
@@ -149,11 +150,14 @@ async def eventstream_health_monitor():
     while True:
         await asyncio.sleep(EventStreamConfig.CHECK_INTERVAL_SECS)
         
-        if last_event_time is None:
+        with _last_event_lock:
+            snapshot = last_event_time
+
+        if snapshot is None:
             logger.warning("EventStream health check: No events received yet")
             continue
-        
-        time_since_last_event = time.time() - last_event_time
+
+        time_since_last_event = time.time() - snapshot
         
         if time_since_last_event > EventStreamConfig.TIMEOUT_SECS:
             logger.error(
@@ -263,7 +267,7 @@ async def stream_worker(channel: discord.TextChannel):
         Blocking producer: iterates EventStreams and enqueues messages.
         Adds simple exponential backoff on errors and logs 403 bodies.
         
-        This runs in a thread pool executor to avoid blocking the async event loop.
+        This runs in a daemon thread to avoid blocking the async event loop.
         Updates global last_event_time on each successful event.
         """
         retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS
@@ -276,7 +280,8 @@ async def stream_worker(channel: discord.TextChannel):
                     retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS  # reset on success
                     
                     # Update heartbeat timestamp
-                    last_event_time = time.time()
+                    with _last_event_lock:
+                        last_event_time = time.time()
                     
                     # Put event in queue with timeout to detect blocking
                     if loop.is_closed():
@@ -325,6 +330,9 @@ async def stream_worker(channel: discord.TextChannel):
                     logger.error("EventStreams HTTP error %s. Body:\n%s", status, (body or "(no body)")[:EventStreamConfig.ERROR_BODY_LIMIT])
                 logger.info("Retrying after %ds", retry_backoff_seconds)
                 time.sleep(retry_backoff_seconds)
+                if loop.is_closed():
+                    logger.info("Event loop closed; producer thread exiting")
+                    return
                 retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
                 # Reinitialize with fresh since=now
                 try:
@@ -344,6 +352,9 @@ async def stream_worker(channel: discord.TextChannel):
             except Exception as e:
                 logger.exception("EventStreams error: %r; retrying in %ds", e, retry_backoff_seconds)
                 time.sleep(retry_backoff_seconds)
+                if loop.is_closed():
+                    logger.info("Event loop closed; producer thread exiting")
+                    return
                 retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
                 # If backoff has reached max, we're in a persistent failure state
                 if retry_backoff_seconds >= max_retry_backoff_seconds:
