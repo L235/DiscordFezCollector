@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -278,6 +279,9 @@ async def stream_worker(channel: discord.TextChannel):
                     last_event_time = time.time()
                     
                     # Put event in queue with timeout to detect blocking
+                    if loop.is_closed():
+                        logger.info("Event loop closed; producer thread exiting")
+                        return
                     try:
                         future = asyncio.run_coroutine_threadsafe(
                             asyncio.wait_for(event_queue.put(evt), timeout=EventStreamConfig.QUEUE_PUT_TIMEOUT_SECS),
@@ -295,6 +299,9 @@ async def stream_worker(channel: discord.TextChannel):
                         time.sleep(RetryConfig.GRACE_PERIOD_SECS)
                         sys.exit(1)
                     except Exception as e:
+                        if loop.is_closed():
+                            logger.info("Event loop closed; producer thread exiting")
+                            return
                         logger.error(f"Failed to enqueue event: {e}")
                 # Iterator ended unexpectedly; reinit.
                 logger.warning("EventStreams iterator ended; reinitializing")
@@ -348,7 +355,10 @@ async def stream_worker(channel: discord.TextChannel):
                     time.sleep(RetryConfig.GRACE_PERIOD_SECS)
                     sys.exit(1)
 
-    loop.run_in_executor(None, _producer)
+    # Use a daemon thread so the producer cannot keep the process alive
+    # after the event loop closes (e.g. during redeploys).
+    t = threading.Thread(target=_producer, daemon=True, name="eventstream-producer")
+    t.start()
 
     while True:
         change = await event_queue.get()
