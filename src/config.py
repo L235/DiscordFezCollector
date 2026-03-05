@@ -26,11 +26,11 @@ USER_AGENT         = os.getenv(
 # Processing constants
 STALENESS_SECS = 2 * 60 * 60  # discard events older than 2 hours
 
-if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
-    logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
-    # We might not want to exit here if we are just importing this module for testing or partial usage
-    # but the original code did exit. Let's keep it for now.
-    sys.exit("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
+def validate_env() -> None:
+    """Validate required environment variables. Call from main(), not at import time."""
+    if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
+        logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
+        sys.exit("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
 
 # --------------------------------------------------------------------------- #
 # ── Webhook URL parsing                                                       #
@@ -156,17 +156,6 @@ async def set_custom_thread_active(thread_id: str, active: bool) -> bool:
         logger.info(f"Thread {thread_id} active state changed: {old_state} -> {active}")
         return True
 
-async def update_custom_thread_config(thread_id: str, new_cfg: dict) -> bool:
-    async with CONFIG_LOCK:
-        entry = CONFIG["threads"].get(thread_id)
-        if not entry:
-            logger.warning(f"Attempted to update config for unknown thread {thread_id}")
-            return False
-        entry["config"] = new_cfg
-        save_config(CONFIG)
-        logger.info(f"Updated config for thread {thread_id}")
-        return True
-
 def _normalise_list_val(v: Any) -> List[str]:
     if isinstance(v, str):
         return [v]
@@ -174,36 +163,72 @@ def _normalise_list_val(v: Any) -> List[str]:
         return [str(x) for x in v]
     return [str(v)]
 
-async def mutate_custom_thread_config_list(thread_id: str, key: str, *, add: Optional[List[str]] = None,
-                                           remove: Optional[List[str]] = None, clear: bool = False) -> Tuple[bool, Optional[List[str]]]:
-    """
-    Mutate an array field of a custom thread config. Returns (ok, new_list|None).
-    """
+# --------------------------------------------------------------------------- #
+# ── Unified entity operations                                               #
+# --------------------------------------------------------------------------- #
+
+async def get_entity_entry(entity_type: str, entity_id: str) -> Optional[dict]:
+    """Get config entry for a thread or receiver by entity type and ID."""
     async with CONFIG_LOCK:
-        entry = CONFIG["threads"].get(thread_id)
-        if not entry:
-            logger.warning(f"Attempted to mutate config for unknown thread {thread_id}")
+        return CONFIG.get(entity_type, {}).get(entity_id)
+
+
+async def update_entity_config(entity_type: str, entity_id: str, new_cfg: dict) -> bool:
+    """Replace an entity's config dict. Works for both threads and receivers."""
+    async with CONFIG_LOCK:
+        entity = CONFIG.get(entity_type, {}).get(entity_id)
+        if not entity:
+            logger.warning(f"Attempted to update config for unknown {entity_type} entry {entity_id}")
+            return False
+        entity["config"] = new_cfg
+        save_config(CONFIG)
+        logger.info(f"Updated config for {entity_type} entry {entity_id}")
+        return True
+
+
+async def mutate_entity_config_list(
+    entity_type: str, entity_id: str, field: str,
+    *, add: Optional[List[str]] = None,
+    remove: Optional[List[str]] = None,
+    clear: bool = False
+) -> Tuple[bool, Optional[List[str]]]:
+    """Mutate a list field in any entity's config. Works for both threads and receivers."""
+    async with CONFIG_LOCK:
+        entity = CONFIG.get(entity_type, {}).get(entity_id)
+        if not entity:
+            logger.warning(f"Attempted to mutate config for unknown {entity_type} entry {entity_id}")
             return False, None
-        cfg = entry["config"]
-        if key not in cfg:
-            # create list field
-            cfg[key] = []
+        cfg = entity["config"]
+        if field not in cfg:
+            cfg[field] = []
         if clear:
-            logger.info(f"Clearing {key} for thread {thread_id}")
-            cfg[key] = []
+            logger.info(f"Clearing {field} for {entity_type} entry {entity_id}")
+            cfg[field] = []
         else:
-            lst = list(cfg[key])
+            lst = list(cfg[field])
             if add:
-                logger.info(f"Adding {add} to {key} for thread {thread_id}")
+                logger.info(f"Adding {add} to {field} for {entity_type} entry {entity_id}")
                 for it in add:
                     if it not in lst:
                         lst.append(it)
             if remove:
-                logger.info(f"Removing {remove} from {key} for thread {thread_id}")
+                logger.info(f"Removing {remove} from {field} for {entity_type} entry {entity_id}")
                 lst = [it for it in lst if it not in remove]
-            cfg[key] = lst
+            cfg[field] = lst
         save_config(CONFIG)
-        return True, list(cfg[key])
+        return True, list(cfg[field])
+
+
+# --------------------------------------------------------------------------- #
+# ── Backward-compatible wrappers (delegate to unified operations)           #
+# --------------------------------------------------------------------------- #
+
+async def update_custom_thread_config(thread_id: str, new_cfg: dict) -> bool:
+    return await update_entity_config("threads", thread_id, new_cfg)
+
+async def mutate_custom_thread_config_list(thread_id: str, key: str, *, add: Optional[List[str]] = None,
+                                           remove: Optional[List[str]] = None, clear: bool = False) -> Tuple[bool, Optional[List[str]]]:
+    return await mutate_entity_config_list("threads", thread_id, key, add=add, remove=remove, clear=clear)
 
 def _validate_receiver_key(key: str) -> bool:
     """Validate receiver key format: alphanumeric + underscores only."""
@@ -211,8 +236,7 @@ def _validate_receiver_key(key: str) -> bool:
 
 async def get_receiver_entry(key: str) -> Optional[dict]:
     """Get a receiver config entry by key."""
-    async with CONFIG_LOCK:
-        return CONFIG.get("receivers", {}).get(key)
+    return await get_entity_entry("receivers", key)
 
 async def create_receiver(key: str, name: str) -> Tuple[bool, str]:
     """
@@ -282,41 +306,9 @@ async def set_receiver_errored(key: str) -> bool:
 
 async def update_receiver_config(key: str, new_cfg: dict) -> bool:
     """Update a receiver's filter config."""
-    async with CONFIG_LOCK:
-        receivers = CONFIG.get("receivers", {})
-        if key not in receivers:
-            return False
-        receivers[key]["config"] = new_cfg
-        save_config(CONFIG)
-        logger.info(f"Updated config for receiver '{key}'")
-    return True
+    return await update_entity_config("receivers", key, new_cfg)
 
-async def mutate_receiver_config_list(
-    key: str,
-    field: str,
-    *,
-    add: Optional[List[str]] = None,
-    remove: Optional[List[str]] = None,
-    clear: bool = False
-) -> Tuple[bool, Optional[List[str]]]:
+async def mutate_receiver_config_list(key: str, field: str, *, add: Optional[List[str]] = None,
+                                     remove: Optional[List[str]] = None, clear: bool = False) -> Tuple[bool, Optional[List[str]]]:
     """Mutate a list field in a receiver's config."""
-    async with CONFIG_LOCK:
-        receivers = CONFIG.get("receivers", {})
-        if key not in receivers:
-            return False, None
-        cfg = receivers[key]["config"]
-        if field not in cfg:
-            cfg[field] = []
-        if clear:
-            cfg[field] = []
-        else:
-            lst = list(cfg[field])
-            if add:
-                for it in add:
-                    if it not in lst:
-                        lst.append(it)
-            if remove:
-                lst = [it for it in lst if it not in remove]
-            cfg[field] = lst
-        save_config(CONFIG)
-        return True, list(cfg[field])
+    return await mutate_entity_config_list("receivers", key, field, add=add, remove=remove, clear=clear)
