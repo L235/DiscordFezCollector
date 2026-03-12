@@ -3,7 +3,7 @@ import discord
 from typing import Dict, Optional
 
 from src.logging_setup import logger
-from src.models import DiscordRateLimitConfig
+from src.models import DiscordRetryConfig
 from src.bot_instance import bot
 
 class WebhookError(Exception):
@@ -11,7 +11,12 @@ class WebhookError(Exception):
 
 async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
     """
-    Execute a Discord API coroutine with exponential backoff on rate limits.
+    Execute a Discord API coroutine with exponential backoff on server errors.
+
+    discord.py already handles 429 rate limits internally (with bucket tracking,
+    global rate limits, and Cloudflare ban detection). This wrapper adds retry
+    logic for 5xx server errors — notably 503, which discord.py does not retry
+    on the bot API path (http.py). See Pycord PR #2395, discordgo PR #1586.
 
     Args:
         coro_func: An async callable (not an awaitable) that makes a Discord API call
@@ -25,37 +30,30 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
         discord.Forbidden: If access is denied (403)
         discord.HTTPException: If max attempts exceeded or other HTTP error
     """
-    backoff = DiscordRateLimitConfig.INITIAL_BACKOFF_SECS
+    backoff = DiscordRetryConfig.INITIAL_BACKOFF_SECS
     last_exception = None
 
-    for attempt in range(DiscordRateLimitConfig.MAX_ATTEMPTS):
+    for attempt in range(DiscordRetryConfig.MAX_ATTEMPTS):
         try:
             return await coro_func(*args, **kwargs)
         except (discord.NotFound, discord.Forbidden):
-            # Let these propagate directly - caller should handle them
             raise
         except discord.HTTPException as e:
             last_exception = e
-            if e.status == 429:
-                # Discord rate limit - use retry_after if provided, otherwise use backoff
-                retry_after = getattr(e, 'retry_after', None)
-                wait_time = retry_after if retry_after else backoff
-
+            if e.status >= 500:
                 logger.warning(
-                    f"Discord rate limit hit (429). Attempt {attempt + 1}/{DiscordRateLimitConfig.MAX_ATTEMPTS}. "
-                    f"Waiting {wait_time:.1f}s before retry..."
+                    f"Discord server error ({e.status}). Attempt {attempt + 1}/{DiscordRetryConfig.MAX_ATTEMPTS}. "
+                    f"Waiting {backoff:.1f}s before retry..."
                 )
-                await asyncio.sleep(wait_time)
-                backoff = min(backoff * 2, DiscordRateLimitConfig.MAX_BACKOFF_SECS)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, DiscordRetryConfig.MAX_BACKOFF_SECS)
             else:
-                # Non-rate-limit error, don't retry
-                logger.error(f"Discord API error (status {e.status}): {e}")
                 raise
 
     # Max attempts exceeded
     logger.error(
-        f"Discord API call failed after {DiscordRateLimitConfig.MAX_ATTEMPTS} attempts. "
-        f"Last error: {last_exception}"
+        f"Discord API call failed after {DiscordRetryConfig.MAX_ATTEMPTS} attempts "
+        f"(status {getattr(last_exception, 'status', '?')}). Last error: {last_exception}"
     )
     if last_exception:
         raise last_exception
@@ -64,7 +62,7 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
 
 async def send_message_with_backoff(target: discord.abc.Messageable, content: str) -> Optional[discord.Message]:
     """
-    Send a message to a Discord channel/thread with rate limit handling.
+    Send a message to a Discord channel/thread with server error retry handling.
 
     Args:
         target: The channel or thread to send to
@@ -91,7 +89,7 @@ async def send_webhook_with_backoff(
     receiver_key: str
 ) -> bool:
     """
-    Send a message to a Discord webhook with exponential backoff on rate limits.
+    Send a message to a Discord webhook with exponential backoff on server errors.
     Uses discord.py's native webhook support.
 
     Args:
@@ -116,7 +114,7 @@ async def send_webhook_with_backoff(
             raise WebhookError(f"Invalid webhook URL: {e}")
 
     try:
-        # Use the existing backoff helper - it handles 429s and retries
+        # Use the existing backoff helper - it handles 5xx retries
         await discord_api_call_with_backoff(webhook.send, content)
         return True
     except discord.NotFound:
