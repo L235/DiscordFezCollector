@@ -3,7 +3,7 @@ fez_collector source package.
 
 This package contains the modular components of the Discord Fez Collector bot:
 - bot_instance: Discord bot instance creation
-- commands: Discord command handlers
+- commands: Discord command handlers (package with domain-specific modules)
 - config: Configuration management and persistence
 - constants: Application-wide constants
 - discord_utils: Discord API helpers with rate limiting
