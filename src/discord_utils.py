@@ -41,7 +41,7 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
         except discord.HTTPException as e:
             last_exception = e
             if e.status >= 500:
-                logger.warning(
+                logger.info(
                     f"Discord server error ({e.status}). Attempt {attempt + 1}/{DiscordRetryConfig.MAX_ATTEMPTS}. "
                     f"Waiting {backoff:.1f}s before retry..."
                 )
