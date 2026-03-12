@@ -52,8 +52,8 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
 
     # Max attempts exceeded
     logger.error(
-        f"Discord API call failed after {DiscordRetryConfig.MAX_ATTEMPTS} attempts. "
-        f"Last error: {last_exception}"
+        f"Discord API call failed after {DiscordRetryConfig.MAX_ATTEMPTS} attempts "
+        f"(status {getattr(last_exception, 'status', '?')}). Last error: {last_exception}"
     )
     if last_exception:
         raise last_exception

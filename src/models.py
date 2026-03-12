@@ -11,9 +11,12 @@ class RetryConfig:
 
 # Discord API retry configuration (for 5xx server errors)
 class DiscordRetryConfig:
-    MAX_ATTEMPTS = int(os.getenv("DISCORD_RATE_LIMIT_MAX_ATTEMPTS", "5"))
-    INITIAL_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_INITIAL_BACKOFF_SECS", "1"))
-    MAX_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_MAX_BACKOFF_SECS", "60"))
+    MAX_ATTEMPTS = int(os.getenv("DISCORD_RETRY_MAX_ATTEMPTS",
+                       os.getenv("DISCORD_RATE_LIMIT_MAX_ATTEMPTS", "5")))
+    INITIAL_BACKOFF_SECS = float(os.getenv("DISCORD_RETRY_INITIAL_BACKOFF_SECS",
+                                 os.getenv("DISCORD_RATE_LIMIT_INITIAL_BACKOFF_SECS", "2")))
+    MAX_BACKOFF_SECS = float(os.getenv("DISCORD_RETRY_MAX_BACKOFF_SECS",
+                             os.getenv("DISCORD_RATE_LIMIT_MAX_BACKOFF_SECS", "60")))
 
 # EventStream configuration
 class EventStreamConfig:
