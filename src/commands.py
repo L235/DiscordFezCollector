@@ -151,6 +151,7 @@ async def fezhelp_cmd(ctx: commands.Context):
 * `pageIncludePatterns` / `pageExcludePatterns` - Page regex patterns
 * `userIncludeList` / `userExcludeList` - User lists
 * `summaryIncludePatterns` / `summaryExcludePatterns` - Summary regex patterns
+* `linkStyle` - `"title"` (default) or `"action"` — controls which part of the message is hyperlinked
 
 **Legacy Commands (still work):**
 * `!add` (→ `/new userthread`), `!addcustom` (→ `/new thread`), `!activate`, `!deactivate`, `!config`"""
