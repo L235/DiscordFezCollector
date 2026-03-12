@@ -31,6 +31,8 @@ from src.commands.helpers import (
                   with_app_command=True)
 @commands.check(is_bot_owner)
 async def receiver_group(ctx: commands.Context):
+    # NOTE: Hardcoded help — update when adding/removing receiver subcommands.
+    # Auto-generation via _build_help_sections covers /fezhelp but not group defaults.
     await ctx.reply(
         "**Receiver Commands (owner only):**\n"
         "* `/receiver list` - List all receivers\n"

@@ -18,6 +18,7 @@ from src.commands.helpers import _in_parent_channel, _require_custom_thread
                   with_app_command=True)
 async def new_group(ctx: commands.Context):
     """`/new` (no subcommand) -> show usage."""
+    # NOTE: Hardcoded help — update when adding/removing /new subcommands.
     await ctx.reply(
         "**New Thread Commands:**\n"
         "* `/new thread <name>` - Create a custom filter thread\n"
@@ -107,6 +108,7 @@ async def activate_custom_thread_cmd(ctx: commands.Context):
     if ok:
         await ctx.reply("Activated.")
     else:
+        logger.error(f"Failed to activate thread {ctx.channel.id}")
         await ctx.reply("Failed to activate (missing config?).")
 
 
@@ -122,4 +124,5 @@ async def deactivate_custom_thread_cmd(ctx: commands.Context):
     if ok:
         await ctx.reply("Deactivated.")
     else:
+        logger.error(f"Failed to deactivate thread {ctx.channel.id}")
         await ctx.reply("Failed to deactivate (missing config?).")

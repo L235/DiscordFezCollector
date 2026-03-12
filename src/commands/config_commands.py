@@ -103,6 +103,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     if ok:
         await ctx.reply(f"Set `{key}`: `{parsed}`")
     else:
+        logger.error(f"Failed to set config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to set.")
 
 
@@ -118,6 +119,7 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
     if ok:
         await ctx.reply(f"Added to `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
+        logger.error(f"Failed to add to config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to add.")
 
 
@@ -133,6 +135,7 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
     if ok:
         await ctx.reply(f"Removed from `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
+        logger.error(f"Failed to remove from config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to remove.")
 
 
@@ -147,6 +150,7 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
     if ok:
         await ctx.reply(f"Cleared `{key}`.")
     else:
+        logger.error(f"Failed to clear config {key} for thread {ctx.channel.id}")
         await ctx.reply("Failed to clear.")
 
 

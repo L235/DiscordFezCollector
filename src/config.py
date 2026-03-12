@@ -288,8 +288,8 @@ async def set_receiver_active(key: str, active: bool) -> Tuple[bool, str]:
             logger.info(f"Cleared error state for receiver '{key}'")
         entry["active"] = active
         save_config(CONFIG)
-        state = "activated" if active else "deactivated"
-        logger.info(f"Receiver '{key}' {state}")
+        logger.info(f"Receiver '{key}' {'activated' if active else 'deactivated'}")
+    state = "activated" if active else "deactivated"
     return True, f"Receiver '{key}' {state}"
 
 async def set_receiver_errored(key: str) -> bool:
