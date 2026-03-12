@@ -100,12 +100,18 @@ def _event_ts_to_epoch(change: dict) -> Optional[float]:
             pass
     return None
 
-def format_change(change: dict) -> str:
-    """Turn one EventStreams record into a concise Discord message."""
+def format_change(change: dict, *, link_style: str = "title") -> str:
+    """Turn one EventStreams record into a concise Discord message.
+
+    Args:
+        change: The EventStreams change record.
+        link_style: "title" to link the page title (default),
+                    "action" to link the action verb instead.
+    """
     user = change['user']
     title = change.get("title", "(no title)")
     comment = change.get("comment") or "(no summary)"
-    
+
     if change["type"] == "log":
         log_comment = change.get("log_action_comment") or comment
         link = f"https://{change.get('server_name','')}/w/index.php?title=Special:Log&logid={change.get('log_id','')}"
@@ -120,17 +126,25 @@ def format_change(change: dict) -> str:
 
     # For regular edits
     page_url = f"https://{change['server_name']}/wiki/{title.replace(' ', '_')}"
-    
+
     # Handle different change types that may or may not have revision info
     if change["type"] == "edit" and "revision" in change:
         diff_url = f"https://{change['server_name']}/w/index.php?diff={change['revision']['new']}"
+        if link_style == "action":
+            return f"**{user}** [edited](<{diff_url}>) **{title}** ({comment})"
         return f"**{user}** edited **[{title}](<{page_url}>)** ({comment}) \n<{diff_url}>"
     elif change["type"] == "new":
+        if link_style == "action":
+            return f"**{user}** [created](<{page_url}>) **{title}** ({comment})"
         return f"**{user}** created **[{title}](<{page_url}>)** ({comment})"
     elif change["type"] == "categorize":
+        if link_style == "action":
+            return f"**{user}** [categorized](<{page_url}>) **{title}** ({comment})"
         return f"**{user}** categorized **[{title}](<{page_url}>)** ({comment})"
     else:
         # Fallback for other change types
+        if link_style == "action":
+            return f"**{user}** [modified](<{page_url}>) **{title}** ({comment})"
         return f"**{user}** modified **[{title}](<{page_url}>)** ({comment})"
 
 async def eventstream_health_monitor():
@@ -397,9 +411,9 @@ async def stream_worker(channel: discord.TextChannel):
             event_queue.task_done()
             continue
 
-        # Determine routing targets
-        targets: List[discord.abc.Messageable] = []
-        receiver_targets: List[str] = []  # List of receiver keys to send to
+        # Determine routing targets: (messageable, link_style) tuples
+        targets: List[Tuple[discord.abc.Messageable, str]] = []
+        receiver_targets: List[Tuple[str, str]] = []  # (key, link_style)
 
         # Custom threads and receivers
         customs = await active_custom_filters()
@@ -430,7 +444,7 @@ async def stream_worker(channel: discord.TextChannel):
                     if filt.matches(change):
                         th = await get_thread_obj(tid)
                         if th is not None:
-                            targets.append(th)
+                            targets.append((th, filt.link_style))
                 except Exception as e:  # pragma: no cover
                     logger.warning(f"Custom filter error for {tid}: {e}")
 
@@ -439,7 +453,7 @@ async def stream_worker(channel: discord.TextChannel):
             for key, filt in receivers:
                 try:
                     if filt.matches(change):
-                        receiver_targets.append(key)
+                        receiver_targets.append((key, filt.link_style))
                 except Exception as e:
                     logger.warning(f"Receiver filter error for '{key}': {e}")
 
@@ -447,9 +461,15 @@ async def stream_worker(channel: discord.TextChannel):
             event_queue.task_done()
             continue  # nothing to do
 
-        msg = format_change(change)
-        if len(msg) > DISCORD_MESSAGE_LIMIT:
-            msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_RESERVE] + TRUNCATED_MESSAGE_SUFFIX
+        # Cache formatted messages by link_style to avoid re-formatting
+        _msg_cache: Dict[str, str] = {}
+        def _get_msg(style: str) -> str:
+            if style not in _msg_cache:
+                msg = format_change(change, link_style=style)
+                if len(msg) > DISCORD_MESSAGE_LIMIT:
+                    msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_RESERVE] + TRUNCATED_MESSAGE_SUFFIX
+                _msg_cache[style] = msg
+            return _msg_cache[style]
 
         # Send to thread targets with rate limit handling
         if logger.isEnabledFor(logging.DEBUG):
@@ -458,17 +478,17 @@ async def stream_worker(channel: discord.TextChannel):
                 len(targets),
                 len(receiver_targets),
             )
-        for tgt in targets:
-            await send_message_with_backoff(tgt, msg)
+        for tgt, style in targets:
+            await send_message_with_backoff(tgt, _get_msg(style))
 
         # Send to receiver webhooks (uses discord.py native webhook support)
-        for key in receiver_targets:
+        for key, style in receiver_targets:
             webhook_url = WEBHOOKS.get(key)
             if not webhook_url:
                 logger.warning(f"Receiver '{key}' matched but no webhook URL")
                 continue
             try:
-                await send_webhook_with_backoff(webhook_url, msg, key)
+                await send_webhook_with_backoff(webhook_url, _get_msg(style), key)
             except WebhookError as e:
                 logger.error(f"Webhook error for receiver '{key}': {e}")
                 # Mark receiver as errored so it stops receiving

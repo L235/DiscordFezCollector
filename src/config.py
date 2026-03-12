@@ -82,6 +82,7 @@ DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
     "userIncludeList": [],
     "summaryIncludePatterns": [],
     "summaryExcludePatterns": [],
+    "linkStyle": "title",  # "title" = link page title, "action" = link action verb
 }
 
 # Config schema (see docstring):
