@@ -8,7 +8,7 @@ os.environ.setdefault("FEZ_COLLECTOR_DISCORD_TOKEN", "test-token")
 os.environ.setdefault("FEZ_COLLECTOR_CHANNEL_ID", "123456")
 
 # Add project root to sys.path so we can import the function directly
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent.parent))
 
 from src.event_streams import format_change
 
