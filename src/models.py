@@ -9,8 +9,8 @@ class RetryConfig:
     MAX_BACKOFF_SECS = int(os.getenv("RETRY_MAX_BACKOFF_SECS", "300"))
     GRACE_PERIOD_SECS = int(os.getenv("RETRY_GRACE_PERIOD_SECS", "5"))
 
-# Discord API rate limit configuration
-class DiscordRateLimitConfig:
+# Discord API retry configuration (for 5xx server errors)
+class DiscordRetryConfig:
     MAX_ATTEMPTS = int(os.getenv("DISCORD_RATE_LIMIT_MAX_ATTEMPTS", "5"))
     INITIAL_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_INITIAL_BACKOFF_SECS", "1"))
     MAX_BACKOFF_SECS = float(os.getenv("DISCORD_RATE_LIMIT_MAX_BACKOFF_SECS", "60"))
