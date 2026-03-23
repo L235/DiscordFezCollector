@@ -102,6 +102,12 @@ def load_config() -> dict:
     # but we no longer mutate them in-place.
     raw.setdefault("threads", {})
     raw.setdefault("receivers", {})
+    # Backfill missing keys from DEFAULT_CUSTOM_CONFIG into existing entries
+    for entry in list(raw["threads"].values()) + list(raw.get("receivers", {}).values()):
+        cfg = entry.get("config")
+        if cfg is not None:
+            for k, v in DEFAULT_CUSTOM_CONFIG.items():
+                cfg.setdefault(k, v)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("Loaded config with %d threads", len(raw.get("threads", {})))
     return raw

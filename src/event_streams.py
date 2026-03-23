@@ -111,7 +111,7 @@ def format_change(change: dict, *, link_style: str = "title") -> str:
     user = change['user']
     title = change.get("title", "(no title)")
     comment = change.get("comment") or "(no summary)"
-
+    
     if change["type"] == "log":
         log_comment = change.get("log_action_comment") or comment
         link = f"https://{change.get('server_name','')}/w/index.php?title=Special:Log&logid={change.get('log_id','')}"
@@ -126,12 +126,12 @@ def format_change(change: dict, *, link_style: str = "title") -> str:
 
     # For regular edits
     page_url = f"https://{change['server_name']}/wiki/{title.replace(' ', '_')}"
-
+    
     # Handle different change types that may or may not have revision info
     if change["type"] == "edit" and "revision" in change:
         diff_url = f"https://{change['server_name']}/w/index.php?diff={change['revision']['new']}"
         if link_style == "action":
-            return f"**{user}** [edited](<{diff_url}>) **{title}** ({comment})"
+            return f"**{user}** [edited](<{diff_url}>) **[{title}](<{page_url}>)** ({comment})"
         return f"**{user}** edited **[{title}](<{page_url}>)** ({comment}) \n<{diff_url}>"
     elif change["type"] == "new":
         if link_style == "action":
@@ -463,9 +463,9 @@ async def stream_worker(channel: discord.TextChannel):
 
         # Cache formatted messages by link_style to avoid re-formatting
         _msg_cache: Dict[str, str] = {}
-        def _get_msg(style: str) -> str:
+        def _get_msg(style: str, _change: dict = change) -> str:
             if style not in _msg_cache:
-                msg = format_change(change, link_style=style)
+                msg = format_change(_change, link_style=style)
                 if len(msg) > DISCORD_MESSAGE_LIMIT:
                     msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_RESERVE] + TRUNCATED_MESSAGE_SUFFIX
                 _msg_cache[style] = msg

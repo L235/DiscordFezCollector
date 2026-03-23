@@ -101,9 +101,9 @@ def test_edit_action_style():
     msg = format_change(_edit_change(), link_style="action")
     # Verb should be linked to the diff URL
     assert "[edited](<https://en.wikipedia.org/w/index.php?diff=12345>)" in msg
-    # Title should be bold but not linked
-    assert "**Test Page**" in msg
-    # No raw diff URL at the end
+    # Title should be bold and linked to the page URL
+    assert "**[Test Page](<https://en.wikipedia.org/wiki/Test_Page>)**" in msg
+    # Diff URL only appears once (on the verb)
     assert msg.count("diff=12345") == 1
 
 
