@@ -94,7 +94,7 @@ def load_config() -> dict:
         logger.info(f"Creating new config file at {STATE_FILE}")
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
+        return json.loads(json.dumps(DEFAULT_CONFIG))
     logger.debug(f"Loading config from {STATE_FILE}")
     with STATE_FILE.open(encoding=UTF8_ENCODING) as fp:
         raw = json.load(fp)
