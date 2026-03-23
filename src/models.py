@@ -52,6 +52,7 @@ class CustomFilter:
         "sum_exclude",
         "user_include",
         "user_exclude",
+        "link_style",
     )
 
     def __init__(self, cfg: dict):
@@ -62,6 +63,8 @@ class CustomFilter:
         self.sum_exclude = _compile_pattern_list(cfg.get("summaryExcludePatterns", []))
         self.user_include = set(cfg.get("userIncludeList", []))
         self.user_exclude = set(cfg.get("userExcludeList", []))
+        # TODO: validate linkStyle against allowed values ("title", "action")
+        self.link_style = cfg.get("linkStyle", "title") or "title"
 
     def matches(self, change: dict) -> bool:
         user = change["user"]

@@ -82,6 +82,7 @@ DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
     "userIncludeList": [],
     "summaryIncludePatterns": [],
     "summaryExcludePatterns": [],
+    "linkStyle": "title",  # "title" = link page title, "action" = link action verb
 }
 
 # Config schema (see docstring):
@@ -93,7 +94,7 @@ def load_config() -> dict:
         logger.info(f"Creating new config file at {STATE_FILE}")
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
+        return json.loads(json.dumps(DEFAULT_CONFIG))
     logger.debug(f"Loading config from {STATE_FILE}")
     with STATE_FILE.open(encoding=UTF8_ENCODING) as fp:
         raw = json.load(fp)
@@ -101,6 +102,13 @@ def load_config() -> dict:
     # but we no longer mutate them in-place.
     raw.setdefault("threads", {})
     raw.setdefault("receivers", {})
+    # Backfill missing keys from DEFAULT_CUSTOM_CONFIG into existing entries
+    for entry in list(raw["threads"].values()) + list(raw.get("receivers", {}).values()):
+        cfg = entry.get("config")
+        if cfg is not None:
+            for k, v in DEFAULT_CUSTOM_CONFIG.items():
+                if k not in cfg:
+                    cfg[k] = v if isinstance(v, str) else list(v)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("Loaded config with %d threads", len(raw.get("threads", {})))
     return raw
