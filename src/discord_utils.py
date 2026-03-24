@@ -86,7 +86,9 @@ _WEBHOOK_CACHE: Dict[str, discord.Webhook] = {}
 async def send_webhook_with_backoff(
     webhook_url: str,
     content: str,
-    receiver_key: str
+    receiver_key: str,
+    *,
+    thread_id: Optional[int] = None,
 ) -> bool:
     """
     Send a message to a Discord webhook with exponential backoff on server errors.
@@ -96,6 +98,8 @@ async def send_webhook_with_backoff(
         webhook_url: The Discord webhook URL
         content: The message content
         receiver_key: Key identifying this receiver (for logging)
+        thread_id: Optional Discord thread ID. When provided, sends the message
+                   into that thread via the webhook.
 
     Returns:
         True if message was sent successfully
@@ -115,7 +119,10 @@ async def send_webhook_with_backoff(
 
     try:
         # Use the existing backoff helper - it handles 5xx retries
-        await discord_api_call_with_backoff(webhook.send, content)
+        send_kwargs = {}
+        if thread_id is not None:
+            send_kwargs["thread"] = discord.Object(id=thread_id)
+        await discord_api_call_with_backoff(webhook.send, content, **send_kwargs)
         return True
     except discord.NotFound:
         # Webhook was deleted
