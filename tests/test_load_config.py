@@ -1,15 +1,8 @@
 """Tests for load_config, focusing on backfill of DEFAULT_CUSTOM_CONFIG keys."""
 import json
-import os
-import sys
 from pathlib import Path
 
 import pytest
-
-os.environ.setdefault("FEZ_COLLECTOR_DISCORD_TOKEN", "test-token")
-os.environ.setdefault("FEZ_COLLECTOR_CHANNEL_ID", "123456")
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from src.config import load_config, DEFAULT_CUSTOM_CONFIG
 from src.constants import CONFIG_VERSION

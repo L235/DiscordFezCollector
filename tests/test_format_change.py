@@ -1,14 +1,4 @@
 """Tests for format_change with link_style parameter."""
-import os
-import sys
-from pathlib import Path
-
-# Set required env vars before importing anything from the project
-os.environ.setdefault("FEZ_COLLECTOR_DISCORD_TOKEN", "test-token")
-os.environ.setdefault("FEZ_COLLECTOR_CHANNEL_ID", "123456")
-
-# Add project root to sys.path so we can import the function directly
-sys.path.append(str(Path(__file__).parent.parent))
 
 from src.event_streams import format_change
 
