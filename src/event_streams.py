@@ -27,7 +27,6 @@ from src.models import EventStreamConfig, RetryConfig, CustomFilter
 from src.config import (
     CONFIG,
     CONFIG_LOCK,
-    DISCORD_CHANNEL_IDS,
     WEBHOOKS,
     USER_AGENT,
     STALENESS_SECS,
@@ -488,6 +487,8 @@ async def stream_worker(channel: discord.TextChannel):
                     continue
                 except WebhookError:
                     logger.warning(f"Parent-channel webhook failed for thread {tgt.id}; falling back to direct send")
+                except Exception:
+                    logger.exception(f"Unexpected error in parent-channel webhook for thread {tgt.id}; falling back to direct send")
             await send_message_with_backoff(tgt, msg)
 
         # Send to receiver webhooks (uses discord.py native webhook support)

@@ -1,6 +1,5 @@
 """Tests for multi-channel parent ID parsing."""
 
-import os
 import pytest
 
 

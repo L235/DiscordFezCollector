@@ -40,9 +40,6 @@ def parse_channel_ids_env() -> set[int]:
 
 DISCORD_CHANNEL_IDS: set[int] = parse_channel_ids_env()
 
-# Backward-compat alias — modules that only need a single ID (e.g. validate_env)
-DISCORD_CHANNEL_ID = next(iter(DISCORD_CHANNEL_IDS))
-
 
 def validate_env() -> None:
     """Validate required environment variables. Call from main(), not at import time."""
