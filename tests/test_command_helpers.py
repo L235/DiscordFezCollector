@@ -1,5 +1,8 @@
 import pytest
 from unittest.mock import AsyncMock, patch
+
+import discord
+
 from src.commands.helpers import (
     _parse_json_arg,
     _deepcopy_cfg,
@@ -111,3 +114,50 @@ class TestMutateFilter:
         await mutate_filter(ctx, "receivers", "rk", FilterType.USER, "Alice",
                             action="add_include", entity_label="Receiver `rk`")
         assert ctx.reply.call_args[0][0].startswith("Receiver `rk`")
+
+
+class TestInParentChannel:
+    def test_matches_when_channel_in_set(self, monkeypatch):
+        import src.commands.helpers as helpers_mod
+        monkeypatch.setattr(helpers_mod, "DISCORD_CHANNEL_IDS", {100, 200, 300})
+        ctx = AsyncMock()
+        ctx.channel.id = 200
+        from src.commands.helpers import _in_parent_channel
+        assert _in_parent_channel(ctx) is True
+
+    def test_rejects_when_channel_not_in_set(self, monkeypatch):
+        import src.commands.helpers as helpers_mod
+        monkeypatch.setattr(helpers_mod, "DISCORD_CHANNEL_IDS", {100, 200, 300})
+        ctx = AsyncMock()
+        ctx.channel.id = 999
+        from src.commands.helpers import _in_parent_channel
+        assert _in_parent_channel(ctx) is False
+
+
+class TestInCustomThread:
+    def test_matches_thread_under_any_parent(self, monkeypatch):
+        import src.commands.helpers as helpers_mod
+        monkeypatch.setattr(helpers_mod, "DISCORD_CHANNEL_IDS", {100, 200})
+        ctx = AsyncMock()
+        ctx.channel = AsyncMock(spec=discord.Thread)
+        ctx.channel.parent_id = 200
+        from src.commands.helpers import _in_custom_thread
+        assert _in_custom_thread(ctx) is True
+
+    def test_rejects_thread_under_unknown_parent(self, monkeypatch):
+        import src.commands.helpers as helpers_mod
+        monkeypatch.setattr(helpers_mod, "DISCORD_CHANNEL_IDS", {100, 200})
+        ctx = AsyncMock()
+        ctx.channel = AsyncMock(spec=discord.Thread)
+        ctx.channel.parent_id = 999
+        from src.commands.helpers import _in_custom_thread
+        assert _in_custom_thread(ctx) is False
+
+    def test_rejects_non_thread_channel(self, monkeypatch):
+        import src.commands.helpers as helpers_mod
+        monkeypatch.setattr(helpers_mod, "DISCORD_CHANNEL_IDS", {100})
+        ctx = AsyncMock()
+        ctx.channel = AsyncMock(spec=discord.TextChannel)
+        ctx.channel.parent_id = 100
+        from src.commands.helpers import _in_custom_thread
+        assert _in_custom_thread(ctx) is False
