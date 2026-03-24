@@ -49,7 +49,7 @@ async def receiver_group(ctx: commands.Context):
 async def receiver_list_cmd(ctx: commands.Context):
     logger.info(f"Receiver list command from {ctx.author}")
     async with CONFIG_LOCK:
-        receivers = CONFIG.get("receivers", {})
+        receivers = dict(CONFIG.get("receivers", {}))
     if not receivers:
         await ctx.reply("No receivers configured.")
         return

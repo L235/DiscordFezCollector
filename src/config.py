@@ -133,12 +133,7 @@ def _blank_custom_cfg() -> dict:
     return json.loads(json.dumps(DEFAULT_CUSTOM_CONFIG))  # deep copy
 
 async def ensure_custom_thread_entry(thread_id: str, thread_name: str, *, create_if_missing: bool = False) -> Optional[dict]:
-    """
-    Ensure CONFIG entry exists for given thread. Returns entry (dict) or None.
-    Modified to take ID and name strings instead of discord.Thread object to avoid discord dependency here?
-    But the original took discord.Thread.
-    Let's take ID and name to keep this module clean of discord imports if possible.
-    """
+    """Return the CONFIG entry for *thread_id*, optionally creating it."""
     async with CONFIG_LOCK:
         entry = CONFIG["threads"].get(thread_id)
         if entry is None and create_if_missing:
@@ -316,7 +311,3 @@ async def update_receiver_config(key: str, new_cfg: dict) -> bool:
     """Update a receiver's filter config."""
     return await update_entity_config("receivers", key, new_cfg)
 
-async def mutate_receiver_config_list(key: str, field: str, *, add: Optional[List[str]] = None,
-                                     remove: Optional[List[str]] = None, clear: bool = False) -> Tuple[bool, Optional[List[str]]]:
-    """Mutate a list field in a receiver's config."""
-    return await mutate_entity_config_list("receivers", key, field, add=add, remove=remove, clear=clear)
