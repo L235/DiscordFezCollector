@@ -51,7 +51,7 @@ def _parse_json_arg(s: str) -> Any:
 
 
 def _deepcopy_cfg(obj: Any) -> Any:
-    """Cheap JSON round-trip copy."""
+    """JSON round-trip copy."""
     try:
         return json.loads(json.dumps(obj))
     except Exception:
@@ -62,10 +62,7 @@ async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
     if not _in_custom_thread(ctx):
         await ctx.reply("This command must be used inside a thread.")
         return None
-    entry = await ensure_custom_thread_entry(str(ctx.channel.id), ctx.channel.name, create_if_missing=False)
-    if entry is None:
-        entry = await ensure_custom_thread_entry(str(ctx.channel.id), ctx.channel.name, create_if_missing=True)
-    return entry
+    return await ensure_custom_thread_entry(str(ctx.channel.id), ctx.channel.name, create_if_missing=True)
 
 
 class FilterType(Enum):

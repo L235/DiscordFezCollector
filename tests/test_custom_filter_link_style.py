@@ -1,8 +1,4 @@
 """Tests for CustomFilter.link_style attribute."""
-import sys
-from pathlib import Path
-
-sys.path.append(str(Path(__file__).parent.parent))
 
 from src.models import CustomFilter
 

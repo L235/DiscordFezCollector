@@ -1,9 +1,5 @@
 import sys
-from pathlib import Path
 import logging
-
-# Add project root to sys.path
-sys.path.append(str(Path(__file__).parent.parent))
 
 def test_imports():
     print("Attempting to import src.main...")

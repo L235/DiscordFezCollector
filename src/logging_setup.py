@@ -1,12 +1,13 @@
 import logging
+import os
 import sys
 from pathlib import Path
 
 def setup_logging():
     """Configure logging with proper formatting and levels."""
     # Create logs directory if it doesn't exist
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
+    log_dir = Path(os.getenv("FEZ_LOG_DIR", "logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
     
     # Configure logging format
     log_format = logging.Formatter(
