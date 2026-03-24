@@ -27,6 +27,7 @@ from src.models import EventStreamConfig, RetryConfig, CustomFilter
 from src.config import (
     CONFIG,
     CONFIG_LOCK,
+    DISCORD_CHANNEL_IDS,
     WEBHOOKS,
     USER_AGENT,
     STALENESS_SECS,
@@ -471,7 +472,7 @@ async def stream_worker(channel: discord.TextChannel):
                 _msg_cache[style] = msg
             return _msg_cache[style]
 
-        # Send to thread targets with rate limit handling
+        # Send to thread targets — prefer parent-channel webhook if available
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "Sending change to %d thread(s) and %d receiver(s)",
@@ -479,7 +480,15 @@ async def stream_worker(channel: discord.TextChannel):
                 len(receiver_targets),
             )
         for tgt, style in targets:
-            await send_message_with_backoff(tgt, _get_msg(style))
+            msg = _get_msg(style)
+            parent_wh_url = WEBHOOKS.get(str(tgt.parent_id)) if hasattr(tgt, "parent_id") else None
+            if parent_wh_url:
+                try:
+                    await send_webhook_with_backoff(parent_wh_url, msg, f"parent-{tgt.parent_id}", thread_id=tgt.id)
+                    continue
+                except WebhookError:
+                    logger.warning(f"Parent-channel webhook failed for thread {tgt.id}; falling back to direct send")
+            await send_message_with_backoff(tgt, msg)
 
         # Send to receiver webhooks (uses discord.py native webhook support)
         for key, style in receiver_targets:
