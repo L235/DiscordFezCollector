@@ -15,7 +15,6 @@ from src.logging_setup import logger
 # --------------------------------------------------------------------------- #
 
 DISCORD_TOKEN      = os.getenv("FEZ_COLLECTOR_DISCORD_TOKEN")
-DISCORD_CHANNEL_ID = int(os.getenv("FEZ_COLLECTOR_CHANNEL_ID", "0"))
 OWNER_ID           = int(os.getenv("FEZ_OWNER_ID", "0"))
 STATE_FILE         = Path(os.getenv("FEZ_COLLECTOR_STATE", "./state/config.json"))
 USER_AGENT         = os.getenv(
@@ -26,11 +25,30 @@ USER_AGENT         = os.getenv(
 # Processing constants
 STALENESS_SECS = 2 * 60 * 60  # discard events older than 2 hours
 
+
+def parse_channel_ids_env() -> set[int]:
+    """Parse parent channel IDs from env vars.
+
+    FEZ_COLLECTOR_CHANNEL_IDS (comma-separated) takes precedence.
+    Falls back to FEZ_COLLECTOR_CHANNEL_ID (singular) for backward compat.
+    """
+    plural = os.getenv("FEZ_COLLECTOR_CHANNEL_IDS", "").strip()
+    if plural:
+        return {int(x.strip()) for x in plural.split(",") if x.strip()}
+    return {int(os.getenv("FEZ_COLLECTOR_CHANNEL_ID", "0"))}
+
+
+DISCORD_CHANNEL_IDS: set[int] = parse_channel_ids_env()
+
+# Backward-compat alias — modules that only need a single ID (e.g. validate_env)
+DISCORD_CHANNEL_ID = next(iter(DISCORD_CHANNEL_IDS))
+
+
 def validate_env() -> None:
     """Validate required environment variables. Call from main(), not at import time."""
-    if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
-        logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
-        sys.exit("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID missing")
+    if not DISCORD_TOKEN or DISCORD_CHANNEL_IDS == {0}:
+        logger.error("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID(S) missing")
+        sys.exit("FEZ_COLLECTOR_DISCORD_TOKEN or FEZ_COLLECTOR_CHANNEL_ID(S) missing")
 
 # --------------------------------------------------------------------------- #
 # ── Webhook URL parsing                                                       #
