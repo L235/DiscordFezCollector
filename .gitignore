@@ -111,4 +111,7 @@ celerybeat.pid
 # mypy
 .mypy_cache/
 .dmypy.json
-dmypy.json 
+dmypy.json
+
+# Worktrees
+.worktrees/
