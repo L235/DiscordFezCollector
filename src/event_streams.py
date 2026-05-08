@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Tuple
 
 import discord
 import requests
-from pywikibot import Site
 from pywikibot import config as pwb_config
 from pywikibot.comms.eventstreams import EventStreams
 
@@ -44,7 +43,6 @@ from src.bot_instance import bot
 # ── MediaWiki EventStreams setup                                             #
 # --------------------------------------------------------------------------- #
 
-site = Site()  # default site; EventStreams ignores this for global streams
 pwb_config.user_agent_description = USER_AGENT
 
 # EventStreams requires `since=` as Unix-ms epoch or ISO-8601 timestamp
