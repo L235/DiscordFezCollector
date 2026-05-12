@@ -5,7 +5,7 @@ import discord
 from discord.ext import commands
 
 from src.logging_setup import logger
-from src.config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, validate_env
+from src.config import DISCORD_TOKEN, DISCORD_CHANNEL_IDS, validate_env
 from src.bot_instance import bot
 # Import commands to ensure they are registered
 import src.commands  # noqa: F401 — triggers command registration
@@ -51,22 +51,23 @@ async def on_ready():
     except Exception as e:
         logger.warning(f"Failed to sync application commands: {e}")
 
-    channel = bot.get_channel(DISCORD_CHANNEL_ID)
-    if channel is None:
-        logger.error(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
-        # We can't exit here effectively because on_ready might fire multiple times, 
-        # but for the first run it's critical.
-        # sys.exit(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
+    for ch_id in DISCORD_CHANNEL_IDS:
+        channel = bot.get_channel(ch_id)
+        if channel is None:
+            logger.warning(f"Could not find channel ID {ch_id}")
+        else:
+            logger.info(f"Found target channel: {channel.name} ({channel.id})")
+
+    if DISCORD_CHANNEL_IDS == {0}:
+        logger.error("No valid channel IDs configured")
         return
-        
-    logger.info(f"Found target channel: {channel.name} ({channel.id})")
-    
+
     # Start the background EventStreams task and health monitor once.
     global _stream_task, _health_monitor_task
-    
+
     if _stream_task is None or _stream_task.done():
         logger.info("Starting EventStreams worker task")
-        _stream_task = bot.loop.create_task(stream_worker(channel))
+        _stream_task = bot.loop.create_task(stream_worker(None))
     else:
         logger.info("EventStreams worker already running; not starting another one")
     

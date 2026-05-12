@@ -12,7 +12,7 @@ from src.constants import JSON_INDENT, UTF8_ENCODING
 from src.config import (
     CONFIG,
     CONFIG_LOCK,
-    DISCORD_CHANNEL_ID,
+    DISCORD_CHANNEL_IDS,
     OWNER_ID,
     save_config,
     ensure_custom_thread_entry,
@@ -31,15 +31,15 @@ is_bot_owner = authorised
 
 
 def _in_parent_channel(ctx: commands.Context) -> bool:
-    """True when in the parent channel. TODO #18: change to `in` when DISCORD_CHANNEL_ID becomes a set."""
-    return ctx.channel.id == DISCORD_CHANNEL_ID
+    """True when in any configured parent channel."""
+    return ctx.channel.id in DISCORD_CHANNEL_IDS
 
 
 def _in_custom_thread(ctx: commands.Context) -> bool:
-    """True when inside any thread spawned from the parent channel."""
+    """True when inside any thread spawned from a parent channel."""
     return (
         isinstance(ctx.channel, discord.Thread)
-        and ctx.channel.parent_id == DISCORD_CHANNEL_ID
+        and ctx.channel.parent_id in DISCORD_CHANNEL_IDS
     )
 
 
