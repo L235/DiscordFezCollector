@@ -16,7 +16,6 @@ from pywikibot import config as pwb_config
 from pywikibot.comms.eventstreams import EventStreams
 
 from src.constants import (
-    ISO_TIMESTAMP_FORMAT,
     DISCORD_MESSAGE_LIMIT,
     TRUNCATION_RESERVE,
     TRUNCATED_MESSAGE_SUFFIX,
@@ -45,13 +44,16 @@ from src.bot_instance import bot
 
 pwb_config.user_agent_description = USER_AGENT
 
-# EventStreams requires `since=` as Unix-ms epoch or ISO-8601 timestamp
-# *without* microseconds and without "+" in TZ (would decode as whitespace).
-_NOW_UTC_ISO = datetime.now(timezone.utc).replace(microsecond=0).strftime(ISO_TIMESTAMP_FORMAT)
-
+# NOTE: We deliberately do *not* pass `since=`. Supplying a `since` timestamp
+# forces stream.wikimedia.org to perform a Kafka offset seek, which
+# intermittently returns HTTP 500 (~20-25% of connections, reproduced
+# directly). Since we always reconnected with `since=now` anyway, the seek
+# bought nothing over the live tail while causing the 500s. Omitting `since`
+# connects at the live tail, which never 500s. Brief reconnect gaps (a few
+# seconds, a few times a day) are well within the STALENESS_SECS tolerance.
+# Full analysis: https://github.com/L235/DiscordFezCollector/issues/46
 stream = EventStreams(
     streams=["recentchange", "revision-create"],
-    since=_NOW_UTC_ISO,
     headers={"user-agent": USER_AGENT},
 )
 
@@ -320,12 +322,11 @@ async def stream_worker(channel: discord.TextChannel):
                             logger.info("Event loop closed; producer thread exiting")
                             return
                         logger.error(f"Failed to enqueue event: {e}")
-                # Iterator ended unexpectedly; reinit.
+                # Iterator ended unexpectedly; reinit at the live tail.
+                # (No `since=` — see note at module-level stream construction.)
                 logger.warning("EventStreams iterator ended; reinitializing")
-                event_stream_since_timestamp = datetime.now(timezone.utc).replace(microsecond=0).strftime(ISO_TIMESTAMP_FORMAT)
                 stream = EventStreams(
                     streams=["recentchange", "revision-create"],
-                    since=event_stream_since_timestamp,
                     headers={"user-agent": USER_AGENT},
                 )
             except requests.HTTPError as e:
@@ -346,12 +347,11 @@ async def stream_worker(channel: discord.TextChannel):
                     logger.info("Event loop closed; producer thread exiting")
                     return
                 retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
-                # Reinitialize with fresh since=now
+                # Reinitialize at the live tail.
+                # (No `since=` — see note at module-level stream construction.)
                 try:
-                    event_stream_since_timestamp = datetime.now(timezone.utc).replace(microsecond=0).strftime(ISO_TIMESTAMP_FORMAT)
                     stream = EventStreams(
                         streams=["recentchange", "revision-create"],
-                        since=event_stream_since_timestamp,
                         headers={"user-agent": USER_AGENT},
                     )
                 except Exception as e2:
