@@ -477,8 +477,10 @@ async def stream_worker(channel: discord.TextChannel):
             event_queue.task_done()
             continue
 
-        # Determine routing targets: (messageable, link_style) tuples
-        targets: List[Tuple[discord.abc.Messageable, str]] = []
+        # Determine routing targets: (thread_id, messageable, link_style) tuples.
+        # The thread_id is carried so a failed send can evict the cached thread
+        # object (see the send loop below).
+        targets: List[Tuple[int, discord.abc.Messageable, str]] = []
         receiver_targets: List[Tuple[str, str]] = []  # (key, link_style)
 
         # Custom threads and receivers
@@ -510,7 +512,7 @@ async def stream_worker(channel: discord.TextChannel):
                     if filt.matches(change):
                         th = await get_thread_obj(tid)
                         if th is not None:
-                            targets.append((th, filt.link_style))
+                            targets.append((tid, th, filt.link_style))
                 except Exception as e:  # pragma: no cover
                     logger.warning(f"Custom filter error for {tid}: {e}")
 
@@ -544,8 +546,18 @@ async def stream_worker(channel: discord.TextChannel):
                 len(targets),
                 len(receiver_targets),
             )
-        for tgt, style in targets:
-            await send_message_with_backoff(tgt, _get_msg(style))
+        for tid, tgt, style in targets:
+            sent = await send_message_with_backoff(tgt, _get_msg(style))
+            if sent is None:
+                # Send to a cached thread failed (deleted, access revoked, or a
+                # transient blip). Evict it so the next matching event misses the
+                # cache and re-runs get_thread_obj's classification: a successful
+                # refetch means it was transient (re-cached, no harm); a
+                # NotFound/Forbidden deactivates the thread and announces it.
+                # Without this, a thread that goes permanently unsendable while
+                # cached would drop every event silently — the same silent
+                # failure this change set is meant to eliminate.
+                THREAD_CACHE.pop(tid, None)
 
         # Send to receiver webhooks (uses discord.py native webhook support)
         for key, style in receiver_targets:
