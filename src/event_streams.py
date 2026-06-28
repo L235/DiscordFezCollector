@@ -30,6 +30,7 @@ from src.config import (
     USER_AGENT,
     STALENESS_SECS,
     set_receiver_errored,
+    set_custom_thread_active,
 )
 from src.discord_utils import (
     discord_api_call_with_backoff,
@@ -158,11 +159,38 @@ def format_receiver_disabled_notice(key: str, reason: str) -> str:
         f"webhook is fixed."
     )
 
-async def eventstream_health_monitor():
+
+def format_thread_disabled_notice(thread_id: int, reason: str) -> str:
+    """Build the main-channel notice posted when a custom thread is auto-disabled
+    because it became permanently unsendable (deleted / no access)."""
+    return (
+        f"⚠️ Custom thread <#{thread_id}> (`{thread_id}`) was automatically "
+        f"deactivated: {reason}\nRecreate the thread (or restore access) to "
+        f"resume routing."
+    )
+
+
+def format_startup_notice() -> str:
+    """Build the main-channel notice posted once when the bot (re)starts."""
+    return "✅ **DiscordFezCollector** started and connected to Wikimedia EventStreams."
+
+
+def format_eventstream_timeout_notice(seconds: float) -> str:
+    """Build the main-channel notice posted before the process restarts itself
+    because the Wikimedia stream went silent."""
+    return (
+        f"⚠️ No Wikimedia events received for {int(seconds)}s — the stream looks "
+        f"stalled; restarting the bot to recover."
+    )
+
+async def eventstream_health_monitor(channel: Optional[discord.TextChannel] = None):
     """
     Monitor the health of the EventStream connection.
     If no events are received within EventStreamConfig.TIMEOUT_SECS, assume the
     connection is dead and terminate the process for external restart.
+
+    If a channel is supplied, a notice is posted there before the restart so the
+    outage is visible (this path runs in the async loop, so the send can flush).
     """
     logger.info(
         f"EventStream health monitor started (timeout: {EventStreamConfig.TIMEOUT_SECS}s, "
@@ -189,6 +217,12 @@ async def eventstream_health_monitor():
                 f"EventStream TIMEOUT: No events received for {time_since_last_event:.0f}s "
                 f"(threshold: {EventStreamConfig.TIMEOUT_SECS}s). Terminating process for restart."
             )
+            # Announce before dying (best-effort; runs in the async loop so the
+            # send can complete before SIGTERM tears the loop down).
+            if channel is not None:
+                await send_message_with_backoff(
+                    channel, format_eventstream_timeout_notice(time_since_last_event)
+                )
             # Terminate the process - external process manager should restart it
             os.kill(os.getpid(), signal.SIGTERM)
             await asyncio.sleep(RetryConfig.GRACE_PERIOD_SECS)  # Grace period
@@ -266,8 +300,23 @@ async def stream_worker(channel: discord.TextChannel):
             return th
         try:
             ch = await discord_api_call_with_backoff(bot.fetch_channel, tid)
-        except (discord.NotFound, discord.Forbidden):
+        except (discord.NotFound, discord.Forbidden) as e:
             THREAD_CACHE.pop(tid, None)
+            # Permanently unsendable (deleted / access revoked): deactivate the
+            # thread and announce it, so its silent stop is noticed — mirrors the
+            # receiver-disabled behavior. set_custom_thread_active returns False
+            # if the thread isn't a tracked custom thread (then stay quiet).
+            reason = (
+                "thread not found (deleted?)"
+                if isinstance(e, discord.NotFound)
+                else "access forbidden"
+            )
+            if await set_custom_thread_active(str(tid), False):
+                logger.error(f"Custom thread {tid} permanently unsendable ({reason}); deactivated")
+                if channel is not None:
+                    await send_message_with_backoff(
+                        channel, format_thread_disabled_notice(tid, reason)
+                    )
             return None
         except discord.HTTPException as e:
             logger.warning(f"Failed to fetch channel {tid}: {e}")

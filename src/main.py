@@ -9,7 +9,13 @@ from src.config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, validate_env
 from src.bot_instance import bot
 # Import commands to ensure they are registered
 import src.commands  # noqa: F401 — triggers command registration
-from src.event_streams import stream_worker, eventstream_health_monitor, THREAD_CACHE
+from src.event_streams import (
+    stream_worker,
+    eventstream_health_monitor,
+    THREAD_CACHE,
+    format_startup_notice,
+)
+from src.discord_utils import send_message_with_backoff
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
@@ -40,6 +46,7 @@ async def on_thread_delete(thread: discord.Thread):
 
 _stream_task: asyncio.Task = None
 _health_monitor_task: asyncio.Task = None
+_startup_announced: bool = False
 
 @bot.event
 async def on_ready():
@@ -60,19 +67,26 @@ async def on_ready():
         return
         
     logger.info(f"Found target channel: {channel.name} ({channel.id})")
-    
+
+    # Announce startup once per process so every (re)start is visible in the
+    # channel — on_ready can fire more than once, so guard with a flag.
+    global _startup_announced
+    if not _startup_announced:
+        _startup_announced = True
+        await send_message_with_backoff(channel, format_startup_notice())
+
     # Start the background EventStreams task and health monitor once.
     global _stream_task, _health_monitor_task
-    
+
     if _stream_task is None or _stream_task.done():
         logger.info("Starting EventStreams worker task")
         _stream_task = bot.loop.create_task(stream_worker(channel))
     else:
         logger.info("EventStreams worker already running; not starting another one")
-    
+
     if _health_monitor_task is None or _health_monitor_task.done():
         logger.info("Starting EventStream health monitor task")
-        _health_monitor_task = bot.loop.create_task(eventstream_health_monitor())
+        _health_monitor_task = bot.loop.create_task(eventstream_health_monitor(channel))
     else:
         logger.info("EventStream health monitor already running")
 

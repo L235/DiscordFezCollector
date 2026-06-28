@@ -114,12 +114,24 @@ def load_config() -> dict:
     return raw
 
 
-def save_config(cfg: dict) -> None:
+def save_config(cfg: dict) -> bool:
+    """Atomically persist the config. Returns True on success, False on failure.
+
+    A write failure (read-only / full volume, permissions) is logged at ERROR
+    and swallowed rather than propagated — a persistence problem must not crash
+    the EventStreams worker or a command handler. The in-memory CONFIG remains
+    authoritative until the process restarts.
+    """
     tmp = STATE_FILE.with_suffix(".tmp")
-    with tmp.open("w", encoding=UTF8_ENCODING) as fp:
-        json.dump(cfg, fp, indent=JSON_INDENT, sort_keys=True)
-    tmp.replace(STATE_FILE)
+    try:
+        with tmp.open("w", encoding=UTF8_ENCODING) as fp:
+            json.dump(cfg, fp, indent=JSON_INDENT, sort_keys=True)
+        tmp.replace(STATE_FILE)
+    except Exception as e:
+        logger.error(f"Failed to persist config to {STATE_FILE}: {e}")
+        return False
     logger.debug(f"Config saved to {STATE_FILE}")
+    return True
 
 
 CONFIG: Dict[str, Any] = load_config()
