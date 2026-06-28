@@ -183,6 +183,29 @@ def format_eventstream_timeout_notice(seconds: float) -> str:
         f"stalled; restarting the bot to recover."
     )
 
+
+async def _announce(channel: Optional[discord.TextChannel], text: str) -> None:
+    """Best-effort post of an operator notice to the main channel; no-op when no
+    channel is available. (send_message_with_backoff swallows its own errors.)"""
+    if channel is not None:
+        await send_message_with_backoff(channel, text)
+
+
+async def _deactivate_dead_thread(
+    tid: int, exc: Exception, channel: Optional[discord.TextChannel]
+) -> None:
+    """Handle a custom thread that is permanently unsendable (deleted / access
+    revoked): deactivate it and announce, so the silent stop is noticed. Stays
+    quiet if `tid` isn't a tracked custom thread."""
+    reason = (
+        "thread not found (deleted?)"
+        if isinstance(exc, discord.NotFound)
+        else "access forbidden"
+    )
+    if await set_custom_thread_active(str(tid), False):
+        logger.error(f"Custom thread {tid} permanently unsendable ({reason}); deactivated")
+        await _announce(channel, format_thread_disabled_notice(tid, reason))
+
 async def eventstream_health_monitor(channel: Optional[discord.TextChannel] = None):
     """
     Monitor the health of the EventStream connection.
@@ -219,10 +242,7 @@ async def eventstream_health_monitor(channel: Optional[discord.TextChannel] = No
             )
             # Announce before dying (best-effort; runs in the async loop so the
             # send can complete before SIGTERM tears the loop down).
-            if channel is not None:
-                await send_message_with_backoff(
-                    channel, format_eventstream_timeout_notice(time_since_last_event)
-                )
+            await _announce(channel, format_eventstream_timeout_notice(time_since_last_event))
             # Terminate the process - external process manager should restart it
             os.kill(os.getpid(), signal.SIGTERM)
             await asyncio.sleep(RetryConfig.GRACE_PERIOD_SECS)  # Grace period
@@ -302,21 +322,7 @@ async def stream_worker(channel: discord.TextChannel):
             ch = await discord_api_call_with_backoff(bot.fetch_channel, tid)
         except (discord.NotFound, discord.Forbidden) as e:
             THREAD_CACHE.pop(tid, None)
-            # Permanently unsendable (deleted / access revoked): deactivate the
-            # thread and announce it, so its silent stop is noticed — mirrors the
-            # receiver-disabled behavior. set_custom_thread_active returns False
-            # if the thread isn't a tracked custom thread (then stay quiet).
-            reason = (
-                "thread not found (deleted?)"
-                if isinstance(e, discord.NotFound)
-                else "access forbidden"
-            )
-            if await set_custom_thread_active(str(tid), False):
-                logger.error(f"Custom thread {tid} permanently unsendable ({reason}); deactivated")
-                if channel is not None:
-                    await send_message_with_backoff(
-                        channel, format_thread_disabled_notice(tid, reason)
-                    )
+            await _deactivate_dead_thread(tid, e, channel)
             return None
         except discord.HTTPException as e:
             logger.warning(f"Failed to fetch channel {tid}: {e}")
@@ -555,10 +561,7 @@ async def stream_worker(channel: discord.TextChannel):
                 # it in the main channel so the silent death gets noticed.
                 logger.error(f"Webhook error for receiver '{key}': {e}")
                 await set_receiver_errored(key)
-                if channel is not None:
-                    await send_message_with_backoff(
-                        channel, format_receiver_disabled_notice(key, str(e))
-                    )
+                await _announce(channel, format_receiver_disabled_notice(key, str(e)))
             except TransientWebhookError as e:
                 # Recoverable failure (5xx/network/timeout): drop this one event
                 # but keep the receiver active so a passing hiccup cannot silence
