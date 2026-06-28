@@ -2,7 +2,6 @@
 VERSION = "0.9-webhooks"
 CONFIG_VERSION = "0.9"
 UTF8_ENCODING = "utf-8"
-ISO_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 JSON_INDENT = 2
 
 # Discord limits
