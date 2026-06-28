@@ -29,12 +29,14 @@ from src.config import (
     USER_AGENT,
     STALENESS_SECS,
     set_receiver_errored,
+    set_custom_thread_active,
 )
 from src.discord_utils import (
     discord_api_call_with_backoff,
     send_message_with_backoff,
     send_webhook_with_backoff,
     WebhookError,
+    TransientWebhookError,
 )
 from src.bot_instance import bot
 
@@ -147,11 +149,73 @@ def format_change(change: dict, *, link_style: str = "title") -> str:
             return f"**{user}** [modified](<{page_url}>) **{title}** ({comment})"
         return f"**{user}** modified **[{title}](<{page_url}>)** ({comment})"
 
-async def eventstream_health_monitor():
+def format_receiver_disabled_notice(key: str, reason: str) -> str:
+    """Build the main-channel notice posted when a receiver is auto-disabled.
+
+    Surfaces the silent failure: which receiver, why, and how to recover — so a
+    permanently-broken webhook is noticed instead of dying quietly.
+    """
+    return (
+        f"⚠️ Receiver **{key}** was automatically disabled after a webhook "
+        f"failure: {reason}\nReactivate with `/receiver activate {key}` once the "
+        f"webhook is fixed."
+    )
+
+
+def format_thread_disabled_notice(thread_id: int, reason: str) -> str:
+    """Build the main-channel notice posted when a custom thread is auto-disabled
+    because it became permanently unsendable (deleted / no access)."""
+    return (
+        f"⚠️ Custom thread <#{thread_id}> (`{thread_id}`) was automatically "
+        f"deactivated: {reason}\nRecreate the thread (or restore access) to "
+        f"resume routing."
+    )
+
+
+def format_startup_notice() -> str:
+    """Build the main-channel notice posted once when the bot (re)starts."""
+    return "✅ **DiscordFezCollector** started and connected to Wikimedia EventStreams."
+
+
+def format_eventstream_timeout_notice(seconds: float) -> str:
+    """Build the main-channel notice posted before the process restarts itself
+    because the Wikimedia stream went silent."""
+    return (
+        f"⚠️ No Wikimedia events received for {int(seconds)}s — the stream looks "
+        f"stalled; restarting the bot to recover."
+    )
+
+
+async def _announce(channel: Optional[discord.TextChannel], text: str) -> None:
+    """Best-effort post of an operator notice to the main channel; no-op when no
+    channel is available. (send_message_with_backoff swallows its own errors.)"""
+    if channel is not None:
+        await send_message_with_backoff(channel, text)
+
+
+async def _deactivate_dead_thread(
+    tid: int, exc: Exception, channel: Optional[discord.TextChannel]
+) -> None:
+    """Handle a custom thread that is permanently unsendable (deleted / access
+    revoked): deactivate it and announce, so the silent stop is noticed. Stays
+    quiet if `tid` isn't a tracked custom thread."""
+    reason = (
+        "thread not found (deleted?)"
+        if isinstance(exc, discord.NotFound)
+        else "access forbidden"
+    )
+    if await set_custom_thread_active(str(tid), False):
+        logger.error(f"Custom thread {tid} permanently unsendable ({reason}); deactivated")
+        await _announce(channel, format_thread_disabled_notice(tid, reason))
+
+async def eventstream_health_monitor(channel: Optional[discord.TextChannel] = None):
     """
     Monitor the health of the EventStream connection.
     If no events are received within EventStreamConfig.TIMEOUT_SECS, assume the
     connection is dead and terminate the process for external restart.
+
+    If a channel is supplied, a notice is posted there before the restart so the
+    outage is visible (this path runs in the async loop, so the send can flush).
     """
     logger.info(
         f"EventStream health monitor started (timeout: {EventStreamConfig.TIMEOUT_SECS}s, "
@@ -178,6 +242,9 @@ async def eventstream_health_monitor():
                 f"EventStream TIMEOUT: No events received for {time_since_last_event:.0f}s "
                 f"(threshold: {EventStreamConfig.TIMEOUT_SECS}s). Terminating process for restart."
             )
+            # Announce before dying (best-effort; runs in the async loop so the
+            # send can complete before SIGTERM tears the loop down).
+            await _announce(channel, format_eventstream_timeout_notice(time_since_last_event))
             # Terminate the process - external process manager should restart it
             os.kill(os.getpid(), signal.SIGTERM)
             await asyncio.sleep(RetryConfig.GRACE_PERIOD_SECS)  # Grace period
@@ -255,8 +322,9 @@ async def stream_worker(channel: discord.TextChannel):
             return th
         try:
             ch = await discord_api_call_with_backoff(bot.fetch_channel, tid)
-        except (discord.NotFound, discord.Forbidden):
+        except (discord.NotFound, discord.Forbidden) as e:
             THREAD_CACHE.pop(tid, None)
+            await _deactivate_dead_thread(tid, e, channel)
             return None
         except discord.HTTPException as e:
             logger.warning(f"Failed to fetch channel {tid}: {e}")
@@ -409,8 +477,10 @@ async def stream_worker(channel: discord.TextChannel):
             event_queue.task_done()
             continue
 
-        # Determine routing targets: (messageable, link_style) tuples
-        targets: List[Tuple[discord.abc.Messageable, str]] = []
+        # Determine routing targets: (thread_id, messageable, link_style) tuples.
+        # The thread_id is carried so a failed send can evict the cached thread
+        # object (see the send loop below).
+        targets: List[Tuple[int, discord.abc.Messageable, str]] = []
         receiver_targets: List[Tuple[str, str]] = []  # (key, link_style)
 
         # Custom threads and receivers
@@ -442,7 +512,7 @@ async def stream_worker(channel: discord.TextChannel):
                     if filt.matches(change):
                         th = await get_thread_obj(tid)
                         if th is not None:
-                            targets.append((th, filt.link_style))
+                            targets.append((tid, th, filt.link_style))
                 except Exception as e:  # pragma: no cover
                     logger.warning(f"Custom filter error for {tid}: {e}")
 
@@ -476,8 +546,18 @@ async def stream_worker(channel: discord.TextChannel):
                 len(targets),
                 len(receiver_targets),
             )
-        for tgt, style in targets:
-            await send_message_with_backoff(tgt, _get_msg(style))
+        for tid, tgt, style in targets:
+            sent = await send_message_with_backoff(tgt, _get_msg(style))
+            if sent is None:
+                # Send to a cached thread failed (deleted, access revoked, or a
+                # transient blip). Evict it so the next matching event misses the
+                # cache and re-runs get_thread_obj's classification: a successful
+                # refetch means it was transient (re-cached, no harm); a
+                # NotFound/Forbidden deactivates the thread and announces it.
+                # Without this, a thread that goes permanently unsendable while
+                # cached would drop every event silently — the same silent
+                # failure this change set is meant to eliminate.
+                THREAD_CACHE.pop(tid, None)
 
         # Send to receiver webhooks (uses discord.py native webhook support)
         for key, style in receiver_targets:
@@ -488,8 +568,16 @@ async def stream_worker(channel: discord.TextChannel):
             try:
                 await send_webhook_with_backoff(webhook_url, _get_msg(style), key)
             except WebhookError as e:
+                # Permanent failure (404/403/401/bad URL): disable the receiver
+                # so it stops trying a webhook that cannot succeed, and announce
+                # it in the main channel so the silent death gets noticed.
                 logger.error(f"Webhook error for receiver '{key}': {e}")
-                # Mark receiver as errored so it stops receiving
                 await set_receiver_errored(key)
+                await _announce(channel, format_receiver_disabled_notice(key, str(e)))
+            except TransientWebhookError as e:
+                # Recoverable failure (5xx/network/timeout): drop this one event
+                # but keep the receiver active so a passing hiccup cannot silence
+                # it indefinitely. (Already logged at WARNING in the sender.)
+                logger.debug(f"Transient webhook failure for receiver '{key}': {e}")
 
         event_queue.task_done()

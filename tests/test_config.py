@@ -275,3 +275,18 @@ class TestConfigPersistence:
 
         loaded = load_config()
         assert "receivers" in loaded
+
+    def test_save_failure_is_logged_not_raised(self, tmp_path, monkeypatch, caplog):
+        # A write failure (e.g. read-only / full volume) must not propagate and
+        # crash the caller; it should be logged at ERROR and report failure.
+        unwritable = tmp_path / "no_such_dir" / "state.json"  # parent doesn't exist
+        monkeypatch.setattr(config_mod, "STATE_FILE", unwritable)
+
+        with caplog.at_level("ERROR"):
+            result = save_config(CONFIG)  # must not raise
+
+        assert result is False
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_save_success_returns_true(self):
+        assert save_config(CONFIG) is True
