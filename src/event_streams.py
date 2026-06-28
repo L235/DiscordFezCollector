@@ -36,6 +36,7 @@ from src.discord_utils import (
     send_message_with_backoff,
     send_webhook_with_backoff,
     WebhookError,
+    TransientWebhookError,
 )
 from src.bot_instance import bot
 
@@ -488,8 +489,14 @@ async def stream_worker(channel: discord.TextChannel):
             try:
                 await send_webhook_with_backoff(webhook_url, _get_msg(style), key)
             except WebhookError as e:
+                # Permanent failure (404/403/401/bad URL): disable the receiver
+                # so it stops trying a webhook that cannot succeed.
                 logger.error(f"Webhook error for receiver '{key}': {e}")
-                # Mark receiver as errored so it stops receiving
                 await set_receiver_errored(key)
+            except TransientWebhookError as e:
+                # Recoverable failure (5xx/network/timeout): drop this one event
+                # but keep the receiver active so a passing hiccup cannot silence
+                # it indefinitely. (Already logged at WARNING in the sender.)
+                logger.debug(f"Transient webhook failure for receiver '{key}': {e}")
 
         event_queue.task_done()

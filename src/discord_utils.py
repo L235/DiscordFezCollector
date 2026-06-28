@@ -7,7 +7,16 @@ from src.models import DiscordRetryConfig
 from src.bot_instance import bot
 
 class WebhookError(Exception):
-    """Raised when a webhook send fails permanently."""
+    """Raised when a webhook is permanently broken (404 deleted, 403 forbidden,
+    401 unauthorized, malformed URL). The EventStreams worker disables the
+    receiver in response, since retrying cannot succeed."""
+
+
+class TransientWebhookError(Exception):
+    """Raised when a webhook send fails for a recoverable reason (5xx after
+    retries, network blip, unexpected error). The EventStreams worker logs and
+    drops the single event but keeps the receiver active — a temporary Discord
+    hiccup must not permanently silence a receiver."""
 
 async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
     """
@@ -118,15 +127,33 @@ async def send_webhook_with_backoff(
         await discord_api_call_with_backoff(webhook.send, content)
         return True
     except discord.NotFound:
-        # Webhook was deleted
+        # Webhook was deleted — permanent.
         _WEBHOOK_CACHE.pop(webhook_url, None)
         logger.error(f"Webhook not found for '{receiver_key}' (deleted?)")
         raise WebhookError("Webhook not found (404)")
     except discord.Forbidden:
-        # Permission denied
+        # Permission denied — permanent.
         _WEBHOOK_CACHE.pop(webhook_url, None)
         logger.error(f"Webhook forbidden for '{receiver_key}'")
         raise WebhookError("Webhook forbidden (403)")
     except discord.HTTPException as e:
-        logger.error(f"Webhook HTTP error for '{receiver_key}': {e}")
-        raise WebhookError(f"HTTP error: {e}")
+        # 401 = invalid/revoked token: the webhook is permanently broken.
+        # Everything else (5xx that exhausted retries, 429, etc.) is transient —
+        # disabling the receiver for it would silence it over a passing hiccup.
+        if getattr(e, "status", None) == 401:
+            _WEBHOOK_CACHE.pop(webhook_url, None)
+            logger.error(f"Webhook unauthorized (401) for '{receiver_key}'")
+            raise WebhookError("Webhook unauthorized (401)")
+        logger.warning(
+            f"Transient webhook HTTP error for '{receiver_key}' "
+            f"(status {getattr(e, 'status', '?')}); event dropped, receiver kept active: {e}"
+        )
+        raise TransientWebhookError(f"HTTP {getattr(e, 'status', '?')}: {e}")
+    except Exception as e:
+        # Network errors, timeouts, anything unexpected — treat as transient so a
+        # blip cannot permanently disable the receiver.
+        logger.warning(
+            f"Transient webhook error for '{receiver_key}'; "
+            f"event dropped, receiver kept active: {e}"
+        )
+        raise TransientWebhookError(str(e))
