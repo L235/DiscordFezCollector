@@ -97,3 +97,14 @@ def test_transient_is_not_a_webhookerror():
     # failure must not be caught by that clause.
     assert not issubclass(TransientWebhookError, WebhookError)
     assert not issubclass(WebhookError, TransientWebhookError)
+
+
+# ── Operator notification when a receiver is auto-disabled ───────────────────
+
+def test_disabled_notice_names_receiver_reason_and_recovery():
+    from src.event_streams import format_receiver_disabled_notice
+
+    note = format_receiver_disabled_notice("spi", "Webhook not found (404)")
+    assert "spi" in note                       # which receiver
+    assert "Webhook not found (404)" in note    # why
+    assert "/receiver activate spi" in note     # how to recover

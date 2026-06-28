@@ -146,6 +146,18 @@ def format_change(change: dict, *, link_style: str = "title") -> str:
             return f"**{user}** [modified](<{page_url}>) **{title}** ({comment})"
         return f"**{user}** modified **[{title}](<{page_url}>)** ({comment})"
 
+def format_receiver_disabled_notice(key: str, reason: str) -> str:
+    """Build the main-channel notice posted when a receiver is auto-disabled.
+
+    Surfaces the silent failure: which receiver, why, and how to recover — so a
+    permanently-broken webhook is noticed instead of dying quietly.
+    """
+    return (
+        f"⚠️ Receiver **{key}** was automatically disabled after a webhook "
+        f"failure: {reason}\nReactivate with `/receiver activate {key}` once the "
+        f"webhook is fixed."
+    )
+
 async def eventstream_health_monitor():
     """
     Monitor the health of the EventStream connection.
@@ -490,9 +502,14 @@ async def stream_worker(channel: discord.TextChannel):
                 await send_webhook_with_backoff(webhook_url, _get_msg(style), key)
             except WebhookError as e:
                 # Permanent failure (404/403/401/bad URL): disable the receiver
-                # so it stops trying a webhook that cannot succeed.
+                # so it stops trying a webhook that cannot succeed, and announce
+                # it in the main channel so the silent death gets noticed.
                 logger.error(f"Webhook error for receiver '{key}': {e}")
                 await set_receiver_errored(key)
+                if channel is not None:
+                    await send_message_with_backoff(
+                        channel, format_receiver_disabled_notice(key, str(e))
+                    )
             except TransientWebhookError as e:
                 # Recoverable failure (5xx/network/timeout): drop this one event
                 # but keep the receiver active so a passing hiccup cannot silence
