@@ -68,7 +68,8 @@ def parse_webhooks_env() -> dict[str, str]:
         logger.info(f"Loaded {len(result)} webhook(s) from FEZ_WEBHOOKS: {list(result.keys())}")
     return result
 
-WEBHOOKS: dict[str, str] = parse_webhooks_env()
+# Receiver webhook URLs, keyed by receiver key. Populated by init_state().
+WEBHOOKS: dict[str, str] = {}
 
 # --------------------------------------------------------------------------- #
 # ── Config management                                                        #
@@ -134,8 +135,24 @@ def save_config(cfg: dict) -> bool:
     return True
 
 
-CONFIG: dict[str, Any] = load_config()
+# The live config. Starts empty; populated by init_state() from main().
+# Importing this module must stay side-effect free (no file reads/writes) so
+# tests and tooling can import the codebase anywhere.
+CONFIG: dict[str, Any] = {}
 CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
+
+
+def init_state() -> None:
+    """Load the persistent config and webhook env into the module-level dicts.
+
+    Called once from main() at startup — never at import time. Mutates the
+    existing dict objects in place so every `from src.config import CONFIG`
+    reference stays valid.
+    """
+    WEBHOOKS.clear()
+    WEBHOOKS.update(parse_webhooks_env())
+    CONFIG.clear()
+    CONFIG.update(load_config())
 
 # --------------------------------------------------------------------------- #
 # ── Helper functions for config mutation                                     #

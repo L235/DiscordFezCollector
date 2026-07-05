@@ -8,7 +8,7 @@ from discord.ext import commands
 # Import commands to ensure they are registered
 import src.commands  # noqa: F401 — triggers command registration
 from src.bot_instance import bot
-from src.config import DISCORD_CHANNEL_ID, DISCORD_TOKEN, validate_env
+from src.config import DISCORD_CHANNEL_ID, DISCORD_TOKEN, init_state, validate_env
 from src.discord_utils import send_message_with_backoff
 from src.event_streams import (
     THREAD_CACHE,
@@ -16,7 +16,7 @@ from src.event_streams import (
     format_startup_notice,
     stream_worker,
 )
-from src.logging_setup import logger
+from src.logging_setup import logger, setup_logging
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
@@ -97,7 +97,9 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 def main():
+    setup_logging()
     validate_env()
+    init_state()
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
