@@ -1,3 +1,4 @@
+import copy
 import json
 from enum import Enum
 from typing import Any
@@ -12,6 +13,7 @@ from src.config import (
     ensure_custom_thread_entry,
     mutate_entity_config_list,
 )
+from src.models import FilterConfig
 
 
 def authorised(ctx) -> bool:
@@ -44,11 +46,36 @@ def _parse_json_arg(s: str) -> Any:
 
 
 def _deepcopy_cfg(obj: Any) -> Any:
-    """JSON round-trip copy."""
-    try:
-        return json.loads(json.dumps(obj))
-    except Exception:
-        return obj
+    return copy.deepcopy(obj)
+
+
+def validate_config_value(key: str, value: Any) -> tuple[str | None, Any]:
+    """Validate a user-supplied `<key> = <value>` config assignment against the
+    FilterConfig schema. Returns (error_message, normalized_value); error is
+    None when valid. Rejecting unknown keys here stops typos from silently
+    creating dead config entries.
+    """
+    if key not in FilterConfig.JSON_KEYS:
+        valid = ", ".join(f"`{k}`" for k in FilterConfig.JSON_KEYS)
+        return f"Unknown config key `{key}`. Valid keys: {valid}", None
+    if key == "linkStyle":
+        if value not in FilterConfig.LINK_STYLES:
+            styles = ", ".join(f"`{s}`" for s in FilterConfig.LINK_STYLES)
+            return f"`linkStyle` must be one of: {styles}", None
+        return None, value
+    if key == "siteName":
+        if not isinstance(value, str):
+            return "`siteName` must be a string.", None
+        return None, value
+    return None, _normalise_list_val(value)
+
+
+def require_list_key(key: str) -> str | None:
+    """Error message when *key* is not a list-valued config key; None if OK."""
+    if key not in FilterConfig.LIST_KEYS:
+        valid = ", ".join(f"`{k}`" for k in sorted(FilterConfig.LIST_KEYS))
+        return f"`{key}` is not a list config key. List keys: {valid}"
+    return None
 
 
 async def _require_custom_thread(ctx: commands.Context) -> dict | None:

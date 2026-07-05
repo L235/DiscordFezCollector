@@ -17,7 +17,7 @@ from src.discord_utils import (
     WebhookError,
     send_webhook_with_backoff,
 )
-from src.models import DiscordRetryConfig
+from src.settings import DiscordRetryConfig
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1/token"
 

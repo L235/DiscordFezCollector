@@ -40,10 +40,13 @@ class TestDeepcopyConfig:
         copy["a"].append(4)
         assert original["a"] == [1, 2, 3]
 
-    def test_non_serializable_returns_original(self):
-        obj = object()
-        result = _deepcopy_cfg(obj)
-        assert result is obj
+    def test_non_json_values_are_still_copied(self):
+        # The old JSON-round-trip implementation silently returned
+        # non-serializable objects by identity; copy.deepcopy handles them.
+        original = {"a": {1, 2}}
+        result = _deepcopy_cfg(original)
+        assert result == original
+        assert result["a"] is not original["a"]
 
 
 class TestFilterTypeMaps:

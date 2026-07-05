@@ -10,6 +10,8 @@ from src.commands.helpers import (
     _parse_json_arg,
     _require_custom_thread,
     authorised,
+    require_list_key,
+    validate_config_value,
 )
 from src.config import (
     CONFIG,
@@ -95,7 +97,10 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
-    parsed = _parse_json_arg(value)
+    err, parsed = validate_config_value(key, _parse_json_arg(value))
+    if err:
+        await ctx.reply(err)
+        return
     cfg = _deepcopy_cfg(entry["config"])
     cfg[key] = parsed
     ok = await update_custom_thread_config(str(ctx.channel.id), cfg)
@@ -113,6 +118,10 @@ async def config_add_cmd(ctx: commands.Context, key: str, *, value: str):
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
+    err = require_list_key(key)
+    if err:
+        await ctx.reply(err)
+        return
     vals = _normalise_list_val(_parse_json_arg(value))
     ok, new_list = await mutate_custom_thread_config_list(str(ctx.channel.id), key, add=vals)
     if ok:
@@ -129,6 +138,10 @@ async def config_remove_cmd(ctx: commands.Context, key: str, *, value: str):
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
+    err = require_list_key(key)
+    if err:
+        await ctx.reply(err)
+        return
     vals = _normalise_list_val(_parse_json_arg(value))
     ok, new_list = await mutate_custom_thread_config_list(str(ctx.channel.id), key, remove=vals)
     if ok:
@@ -144,6 +157,10 @@ async def config_clear_cmd(ctx: commands.Context, key: str):
     logger.info(f"Config clear command from {ctx.author} in thread {ctx.channel.id}: clear {key}")
     entry = await _require_custom_thread(ctx)
     if not entry:
+        return
+    err = require_list_key(key)
+    if err:
+        await ctx.reply(err)
         return
     ok, _ = await mutate_custom_thread_config_list(str(ctx.channel.id), key, clear=True)
     if ok:

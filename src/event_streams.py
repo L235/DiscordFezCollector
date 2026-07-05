@@ -32,8 +32,9 @@ from src.discord_utils import (
     send_webhook_with_backoff,
 )
 from src.logging_setup import logger
-from src.models import CustomFilter, EventStreamConfig, RetryConfig
+from src.models import CustomFilter
 from src.routing import fast_reject, match_filters, truncate_for_discord
+from src.settings import EventStreamConfig, RetryConfig
 
 # --------------------------------------------------------------------------- #
 # ── MediaWiki EventStreams setup                                             #

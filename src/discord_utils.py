@@ -4,7 +4,7 @@ import discord
 
 from src.bot_instance import bot
 from src.logging_setup import logger
-from src.models import DiscordRetryConfig
+from src.settings import DiscordRetryConfig
 
 
 class WebhookError(Exception):

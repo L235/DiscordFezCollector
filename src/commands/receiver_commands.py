@@ -10,6 +10,7 @@ from src.commands.helpers import (
     _parse_json_arg,
     is_bot_owner,
     mutate_filter,
+    validate_config_value,
 )
 from src.config import (
     CONFIG,
@@ -117,7 +118,10 @@ async def receiver_setconfig_cmd(ctx: commands.Context, key: str, config_key: st
     if not entry:
         await ctx.reply(f"Receiver `{key}` not found.")
         return
-    parsed = _parse_json_arg(value)
+    err, parsed = validate_config_value(config_key, _parse_json_arg(value))
+    if err:
+        await ctx.reply(err)
+        return
     cfg = _deepcopy_cfg(entry["config"])
     cfg[config_key] = parsed
     ok = await update_receiver_config(key, cfg)

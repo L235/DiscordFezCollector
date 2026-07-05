@@ -1,35 +1,86 @@
-import os
+"""Domain models: the filter config schema and its compiled matcher."""
+
 import re
+from dataclasses import dataclass, field
 from re import RegexFlag, compile, search
+from typing import Any, ClassVar
 
 
-# Timeout and retry configuration (for EventStreams)
-class RetryConfig:
-    INITIAL_BACKOFF_SECS = int(os.getenv("RETRY_INITIAL_BACKOFF_SECS", "5"))
-    MAX_BACKOFF_SECS = int(os.getenv("RETRY_MAX_BACKOFF_SECS", "300"))
-    GRACE_PERIOD_SECS = int(os.getenv("RETRY_GRACE_PERIOD_SECS", "5"))
+def normalise_str_list(v: Any) -> list[str]:
+    """Coerce a user/JSON-supplied value into a list of strings."""
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    return [str(v)]
 
-# Discord API retry configuration (for 5xx server errors)
-class DiscordRetryConfig:
-    MAX_ATTEMPTS = int(os.getenv("DISCORD_RETRY_MAX_ATTEMPTS",
-                       os.getenv("DISCORD_RATE_LIMIT_MAX_ATTEMPTS", "5")))
-    INITIAL_BACKOFF_SECS = float(os.getenv("DISCORD_RETRY_INITIAL_BACKOFF_SECS",
-                                 os.getenv("DISCORD_RATE_LIMIT_INITIAL_BACKOFF_SECS", "2")))
-    MAX_BACKOFF_SECS = float(os.getenv("DISCORD_RETRY_MAX_BACKOFF_SECS",
-                             os.getenv("DISCORD_RATE_LIMIT_MAX_BACKOFF_SECS", "60")))
 
-# EventStream configuration
-class EventStreamConfig:
-    TIMEOUT_SECS = int(os.getenv("EVENTSTREAM_TIMEOUT_SECS", "600"))  # 10 minutes default
-    CHECK_INTERVAL_SECS = int(os.getenv("EVENTSTREAM_CHECK_INTERVAL_SECS", "60"))
-    QUEUE_MAX_SIZE = int(os.getenv("EVENTSTREAM_QUEUE_MAX_SIZE", "2000"))
-    QUEUE_PUT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_PUT_TIMEOUT_SECS", "30.0"))
-    QUEUE_RESULT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_RESULT_TIMEOUT_SECS", "35.0"))
-    ERROR_BODY_LIMIT = int(os.getenv("EVENTSTREAM_ERROR_BODY_LIMIT", "2000"))
+@dataclass
+class FilterConfig:
+    """Schema for one filter config (custom thread or receiver).
+
+    The single source of truth for the config keys: the camelCase names in
+    JSON_KEYS are the on-disk format and the names users type in
+    `/config set|add|remove`. from_dict() is tolerant (missing keys default,
+    scalars coerce to lists, bad linkStyle falls back to "title") because
+    configs are hand-edited via setraw and may predate newer keys.
+    """
+
+    site_name: str = ""
+    page_include_patterns: list[str] = field(default_factory=list)
+    page_exclude_patterns: list[str] = field(default_factory=list)
+    user_exclude_list: list[str] = field(default_factory=list)
+    user_include_list: list[str] = field(default_factory=list)
+    summary_include_patterns: list[str] = field(default_factory=list)
+    summary_exclude_patterns: list[str] = field(default_factory=list)
+    link_style: str = "title"  # "title" = link page title, "action" = link action verb
+
+    LINK_STYLES: ClassVar[tuple[str, ...]] = ("title", "action")
+
+    #  JSON/config-file key → attribute name (declaration order = output order)
+    JSON_KEYS: ClassVar[dict[str, str]] = {
+        "siteName": "site_name",
+        "pageIncludePatterns": "page_include_patterns",
+        "pageExcludePatterns": "page_exclude_patterns",
+        "userExcludeList": "user_exclude_list",
+        "userIncludeList": "user_include_list",
+        "summaryIncludePatterns": "summary_include_patterns",
+        "summaryExcludePatterns": "summary_exclude_patterns",
+        "linkStyle": "link_style",
+    }
+    #  The keys holding lists (everything except the two scalar keys)
+    LIST_KEYS: ClassVar[frozenset[str]] = frozenset(
+        k for k in JSON_KEYS if k not in ("siteName", "linkStyle")
+    )
+
+    @classmethod
+    def from_dict(cls, cfg: dict) -> "FilterConfig":
+        kwargs: dict[str, Any] = {}
+        for json_key, attr in cls.JSON_KEYS.items():
+            if json_key not in cfg:
+                continue
+            v = cfg[json_key]
+            if json_key == "siteName":
+                kwargs[attr] = str(v) if v else ""
+            elif json_key == "linkStyle":
+                kwargs[attr] = v if v in cls.LINK_STYLES else "title"
+            else:
+                kwargs[attr] = normalise_str_list(v)
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for json_key, attr in self.JSON_KEYS.items():
+            v = getattr(self, attr)
+            out[json_key] = list(v) if isinstance(v, list) else v
+        return out
+
 
 def _compile_pattern_list(patterns: list[str]) -> re.Pattern | None:
-    """
-    Accept list-ish input; coerce scalars to a single-element list.
+    """Combine a pattern list into one case-insensitive alternation regex.
+
+    Tolerates list-ish input (scalars coerce to a single-element list) for
+    direct callers; empty patterns are dropped.
     """
     if isinstance(patterns, str):
         patterns = [patterns]
@@ -43,6 +94,7 @@ def _compile_pattern_list(patterns: list[str]) -> re.Pattern | None:
         return None
     return compile(f"({'|'.join(patterns)})", RegexFlag.IGNORECASE)
 
+
 class CustomFilter:
     __slots__ = (
         "site_name",
@@ -55,16 +107,16 @@ class CustomFilter:
         "link_style",
     )
 
-    def __init__(self, cfg: dict):
-        self.site_name = cfg.get("siteName", "") or ""
-        self.page_include = _compile_pattern_list(cfg.get("pageIncludePatterns", []))
-        self.page_exclude = _compile_pattern_list(cfg.get("pageExcludePatterns", []))
-        self.sum_include = _compile_pattern_list(cfg.get("summaryIncludePatterns", []))
-        self.sum_exclude = _compile_pattern_list(cfg.get("summaryExcludePatterns", []))
-        self.user_include = set(cfg.get("userIncludeList", []))
-        self.user_exclude = set(cfg.get("userExcludeList", []))
-        # TODO: validate linkStyle against allowed values ("title", "action")
-        self.link_style = cfg.get("linkStyle", "title") or "title"
+    def __init__(self, cfg: "dict | FilterConfig"):
+        fc = cfg if isinstance(cfg, FilterConfig) else FilterConfig.from_dict(cfg)
+        self.site_name = fc.site_name
+        self.page_include = _compile_pattern_list(fc.page_include_patterns)
+        self.page_exclude = _compile_pattern_list(fc.page_exclude_patterns)
+        self.sum_include = _compile_pattern_list(fc.summary_include_patterns)
+        self.sum_exclude = _compile_pattern_list(fc.summary_exclude_patterns)
+        self.user_include = set(fc.user_include_list)
+        self.user_exclude = set(fc.user_exclude_list)
+        self.link_style = fc.link_style
 
     def matches(self, change: dict) -> bool:
         user = change["user"]

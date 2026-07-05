@@ -9,6 +9,7 @@ from typing import Any
 
 from src.constants import CONFIG_VERSION, JSON_INDENT, UTF8_ENCODING
 from src.logging_setup import logger
+from src.models import FilterConfig, normalise_str_list
 
 # --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
@@ -75,16 +76,8 @@ WEBHOOKS: dict[str, str] = {}
 # ── Config management                                                        #
 # --------------------------------------------------------------------------- #
 
-DEFAULT_CUSTOM_CONFIG: dict[str, Any] = {
-    "siteName": "",
-    "pageIncludePatterns": [],
-    "pageExcludePatterns": [],
-    "userExcludeList": [],
-    "userIncludeList": [],
-    "summaryIncludePatterns": [],
-    "summaryExcludePatterns": [],
-    "linkStyle": "title",  # "title" = link page title, "action" = link action verb
-}
+# The filter schema is defined once, by FilterConfig (src/models.py).
+DEFAULT_CUSTOM_CONFIG: dict[str, Any] = FilterConfig().to_dict()
 
 # Config schema (see docstring):
 DEFAULT_CONFIG: dict[str, Any] = {"version": CONFIG_VERSION, "threads": {}, "receivers": {}}
@@ -159,7 +152,7 @@ def init_state() -> None:
 # --------------------------------------------------------------------------- #
 
 def _blank_custom_cfg() -> dict:
-    return json.loads(json.dumps(DEFAULT_CUSTOM_CONFIG))  # deep copy
+    return FilterConfig().to_dict()
 
 async def ensure_custom_thread_entry(thread_id: str, thread_name: str, *, create_if_missing: bool = False) -> dict | None:
     """Return the CONFIG entry for *thread_id*, optionally creating it."""
@@ -188,12 +181,8 @@ async def set_custom_thread_active(thread_id: str, active: bool) -> bool:
         logger.info(f"Thread {thread_id} active state changed: {old_state} -> {active}")
         return True
 
-def _normalise_list_val(v: Any) -> list[str]:
-    if isinstance(v, str):
-        return [v]
-    if isinstance(v, list):
-        return [str(x) for x in v]
-    return [str(v)]
+# Re-exported for the command layer; the definition lives with the schema.
+_normalise_list_val = normalise_str_list
 
 # --------------------------------------------------------------------------- #
 # ── Unified entity operations                                               #
