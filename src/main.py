@@ -1,21 +1,22 @@
 import asyncio
 import signal
 import sys
+
 import discord
 from discord.ext import commands
 
-from src.logging_setup import logger
-from src.config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, validate_env
-from src.bot_instance import bot
 # Import commands to ensure they are registered
 import src.commands  # noqa: F401 — triggers command registration
-from src.event_streams import (
-    stream_worker,
-    eventstream_health_monitor,
-    THREAD_CACHE,
-    format_startup_notice,
-)
+from src.bot_instance import bot
+from src.config import DISCORD_CHANNEL_ID, DISCORD_TOKEN, validate_env
 from src.discord_utils import send_message_with_backoff
+from src.event_streams import (
+    THREAD_CACHE,
+    eventstream_health_monitor,
+    format_startup_notice,
+    stream_worker,
+)
+from src.logging_setup import logger
 
 # --------------------------------------------------------------------------- #
 # ── Lifecycle events                                                         #
@@ -61,11 +62,11 @@ async def on_ready():
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
     if channel is None:
         logger.error(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
-        # We can't exit here effectively because on_ready might fire multiple times, 
+        # We can't exit here effectively because on_ready might fire multiple times,
         # but for the first run it's critical.
         # sys.exit(f"Could not find channel ID {DISCORD_CHANNEL_ID}")
         return
-        
+
     logger.info(f"Found target channel: {channel.name} ({channel.id})")
 
     # Announce startup once per process so every (re)start is visible in the
@@ -100,7 +101,7 @@ def main():
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     try:
         logger.info("Starting Discord bot...")
         bot.run(DISCORD_TOKEN)

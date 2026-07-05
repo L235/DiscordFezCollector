@@ -1,4 +1,3 @@
-import pytest
 from src.constants import DISCORD_MESSAGE_LIMIT
 
 

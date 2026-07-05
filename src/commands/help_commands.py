@@ -1,8 +1,8 @@
 from discord.ext import commands
 
-from src.logging_setup import logger
 from src.bot_instance import bot
 from src.constants import DISCORD_MESSAGE_LIMIT
+from src.logging_setup import logger
 
 
 def _build_help_sections() -> list:

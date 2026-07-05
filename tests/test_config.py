@@ -1,7 +1,6 @@
 """Comprehensive tests for src.config entity operations."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -13,7 +12,6 @@ from src.config import (
     parse_webhooks_env,
     save_config,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixture: isolate every test from the real state file / CONFIG dict

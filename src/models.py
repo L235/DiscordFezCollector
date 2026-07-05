@@ -1,7 +1,7 @@
 import os
 import re
 from re import RegexFlag, compile, search
-from typing import List, Optional
+
 
 # Timeout and retry configuration (for EventStreams)
 class RetryConfig:
@@ -27,7 +27,7 @@ class EventStreamConfig:
     QUEUE_RESULT_TIMEOUT_SECS = float(os.getenv("EVENTSTREAM_QUEUE_RESULT_TIMEOUT_SECS", "35.0"))
     ERROR_BODY_LIMIT = int(os.getenv("EVENTSTREAM_ERROR_BODY_LIMIT", "2000"))
 
-def _compile_pattern_list(patterns: List[str]) -> Optional[re.Pattern]:
+def _compile_pattern_list(patterns: list[str]) -> re.Pattern | None:
     """
     Accept list-ish input; coerce scalars to a single-element list.
     """

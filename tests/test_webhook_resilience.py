@@ -13,9 +13,9 @@ import pytest
 
 import src.discord_utils as du
 from src.discord_utils import (
-    send_webhook_with_backoff,
-    WebhookError,
     TransientWebhookError,
+    WebhookError,
+    send_webhook_with_backoff,
 )
 from src.models import DiscordRetryConfig
 

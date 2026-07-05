@@ -2,7 +2,6 @@
 
 from src.event_streams import format_change
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────── #
 
 def _edit_change():

@@ -1,15 +1,15 @@
 import discord
 from discord.ext import commands
 
-from src.logging_setup import logger
 from src.bot_instance import bot
+from src.commands.helpers import _in_parent_channel, _require_custom_thread
 from src.config import (
     ensure_custom_thread_entry,
     mutate_custom_thread_config_list,
     set_custom_thread_active,
 )
 from src.discord_utils import discord_api_call_with_backoff
-from src.commands.helpers import _in_parent_channel, _require_custom_thread
+from src.logging_setup import logger
 
 
 @bot.hybrid_group(name="new",

@@ -1,6 +1,4 @@
-import pytest
 from src.models import CustomFilter, _compile_pattern_list
-
 
 # ── _compile_pattern_list ─────────────────────────────────────────────────── #
 

@@ -1,28 +1,11 @@
-import sys
-import logging
+"""Smoke test: importing the application must succeed (no import-time crashes)."""
+
 
 def test_imports():
-    print("Attempting to import src.main...")
-    try:
-        from src.main import bot
-        print("Successfully imported src.main.bot")
-    except ImportError as e:
-        print(f"Failed to import src.main: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"An error occurred during import: {e}")
-        sys.exit(1)
+    from src.main import bot
 
-    print("Attempting to import src.config...")
-    try:
-        from src.config import CONFIG
-        print("Successfully imported src.config.CONFIG")
-    except Exception as e:
-        print(f"Failed to import src.config: {e}")
-        sys.exit(1)
+    assert bot is not None
 
-    print("All imports successful.")
+    from src.config import CONFIG
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    test_imports()
+    assert isinstance(CONFIG, dict)

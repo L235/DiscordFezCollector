@@ -1,10 +1,11 @@
 import asyncio
-import discord
-from typing import Dict, Optional
 
+import discord
+
+from src.bot_instance import bot
 from src.logging_setup import logger
 from src.models import DiscordRetryConfig
-from src.bot_instance import bot
+
 
 class WebhookError(Exception):
     """Raised when a webhook is permanently broken (404 deleted, 403 forbidden,
@@ -69,7 +70,7 @@ async def discord_api_call_with_backoff(coro_func, *args, **kwargs):
     raise discord.HTTPException(response=None, message="Max attempts reached with no specific error")
 
 
-async def send_message_with_backoff(target: discord.abc.Messageable, content: str) -> Optional[discord.Message]:
+async def send_message_with_backoff(target: discord.abc.Messageable, content: str) -> discord.Message | None:
     """
     Send a message to a Discord channel/thread with server error retry handling.
 
@@ -90,7 +91,7 @@ async def send_message_with_backoff(target: discord.abc.Messageable, content: st
         return None
 
 # Cache for webhook objects: url -> discord.Webhook
-_WEBHOOK_CACHE: Dict[str, discord.Webhook] = {}
+_WEBHOOK_CACHE: dict[str, discord.Webhook] = {}
 
 async def send_webhook_with_backoff(
     webhook_url: str,
@@ -120,7 +121,7 @@ async def send_webhook_with_backoff(
             _WEBHOOK_CACHE[webhook_url] = webhook
         except Exception as e:
             logger.error(f"Invalid webhook URL for '{receiver_key}': {e}")
-            raise WebhookError(f"Invalid webhook URL: {e}")
+            raise WebhookError(f"Invalid webhook URL: {e}") from e
 
     try:
         # Use the existing backoff helper - it handles 5xx retries
@@ -130,12 +131,12 @@ async def send_webhook_with_backoff(
         # Webhook was deleted — permanent.
         _WEBHOOK_CACHE.pop(webhook_url, None)
         logger.error(f"Webhook not found for '{receiver_key}' (deleted?)")
-        raise WebhookError("Webhook not found (404)")
+        raise WebhookError("Webhook not found (404)") from None
     except discord.Forbidden:
         # Permission denied — permanent.
         _WEBHOOK_CACHE.pop(webhook_url, None)
         logger.error(f"Webhook forbidden for '{receiver_key}'")
-        raise WebhookError("Webhook forbidden (403)")
+        raise WebhookError("Webhook forbidden (403)") from None
     except discord.HTTPException as e:
         # 401 = invalid/revoked token: the webhook is permanently broken.
         # Everything else (5xx that exhausted retries, 429, etc.) is transient —
@@ -143,12 +144,12 @@ async def send_webhook_with_backoff(
         if getattr(e, "status", None) == 401:
             _WEBHOOK_CACHE.pop(webhook_url, None)
             logger.error(f"Webhook unauthorized (401) for '{receiver_key}'")
-            raise WebhookError("Webhook unauthorized (401)")
+            raise WebhookError("Webhook unauthorized (401)") from None
         logger.warning(
             f"Transient webhook HTTP error for '{receiver_key}' "
             f"(status {getattr(e, 'status', '?')}); event dropped, receiver kept active: {e}"
         )
-        raise TransientWebhookError(f"HTTP {getattr(e, 'status', '?')}: {e}")
+        raise TransientWebhookError(f"HTTP {getattr(e, 'status', '?')}: {e}") from e
     except Exception as e:
         # Network errors, timeouts, anything unexpected — treat as transient so a
         # blip cannot permanently disable the receiver.
@@ -156,4 +157,4 @@ async def send_webhook_with_backoff(
             f"Transient webhook error for '{receiver_key}'; "
             f"event dropped, receiver kept active: {e}"
         )
-        raise TransientWebhookError(str(e))
+        raise TransientWebhookError(str(e)) from e

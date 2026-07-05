@@ -1,22 +1,15 @@
 import json
-import io
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import discord
 from discord.ext import commands
 
-from src.logging_setup import logger
-from src.bot_instance import bot
-from src.constants import JSON_INDENT, UTF8_ENCODING
 from src.config import (
-    CONFIG,
-    CONFIG_LOCK,
     DISCORD_CHANNEL_ID,
     OWNER_ID,
-    save_config,
-    ensure_custom_thread_entry,
     _normalise_list_val,
+    ensure_custom_thread_entry,
     mutate_entity_config_list,
 )
 
@@ -58,7 +51,7 @@ def _deepcopy_cfg(obj: Any) -> Any:
         return obj
 
 
-async def _require_custom_thread(ctx: commands.Context) -> Optional[dict]:
+async def _require_custom_thread(ctx: commands.Context) -> dict | None:
     if not _in_custom_thread(ctx):
         await ctx.reply("This command must be used inside a thread.")
         return None

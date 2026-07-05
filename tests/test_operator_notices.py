@@ -4,9 +4,9 @@ These cover the pure message formatters (the side-effecting sends are wired in
 the worker / on_ready and verified by integration/manual review).
 """
 from src.event_streams import (
-    format_thread_disabled_notice,
-    format_startup_notice,
     format_eventstream_timeout_notice,
+    format_startup_notice,
+    format_thread_disabled_notice,
 )
 
 

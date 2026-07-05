@@ -5,9 +5,9 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any
 
-from src.constants import UTF8_ENCODING, JSON_INDENT, CONFIG_VERSION
+from src.constants import CONFIG_VERSION, JSON_INDENT, UTF8_ENCODING
 from src.logging_setup import logger
 
 # --------------------------------------------------------------------------- #
@@ -36,7 +36,7 @@ def validate_env() -> None:
 # ── Webhook URL parsing                                                       #
 # --------------------------------------------------------------------------- #
 
-def parse_webhooks_env() -> Dict[str, str]:
+def parse_webhooks_env() -> dict[str, str]:
     """
     Parse FEZ_WEBHOOKS env var.
     Format: "key1=https://discord.com/api/webhooks/...,key2=https://..."
@@ -68,13 +68,13 @@ def parse_webhooks_env() -> Dict[str, str]:
         logger.info(f"Loaded {len(result)} webhook(s) from FEZ_WEBHOOKS: {list(result.keys())}")
     return result
 
-WEBHOOKS: Dict[str, str] = parse_webhooks_env()
+WEBHOOKS: dict[str, str] = parse_webhooks_env()
 
 # --------------------------------------------------------------------------- #
 # ── Config management                                                        #
 # --------------------------------------------------------------------------- #
 
-DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
+DEFAULT_CUSTOM_CONFIG: dict[str, Any] = {
     "siteName": "",
     "pageIncludePatterns": [],
     "pageExcludePatterns": [],
@@ -86,7 +86,7 @@ DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
 }
 
 # Config schema (see docstring):
-DEFAULT_CONFIG: Dict[str, Any] = {"version": CONFIG_VERSION, "threads": {}, "receivers": {}}
+DEFAULT_CONFIG: dict[str, Any] = {"version": CONFIG_VERSION, "threads": {}, "receivers": {}}
 
 
 def load_config() -> dict:
@@ -134,7 +134,7 @@ def save_config(cfg: dict) -> bool:
     return True
 
 
-CONFIG: Dict[str, Any] = load_config()
+CONFIG: dict[str, Any] = load_config()
 CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
 
 # --------------------------------------------------------------------------- #
@@ -144,7 +144,7 @@ CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
 def _blank_custom_cfg() -> dict:
     return json.loads(json.dumps(DEFAULT_CUSTOM_CONFIG))  # deep copy
 
-async def ensure_custom_thread_entry(thread_id: str, thread_name: str, *, create_if_missing: bool = False) -> Optional[dict]:
+async def ensure_custom_thread_entry(thread_id: str, thread_name: str, *, create_if_missing: bool = False) -> dict | None:
     """Return the CONFIG entry for *thread_id*, optionally creating it."""
     async with CONFIG_LOCK:
         entry = CONFIG["threads"].get(thread_id)
@@ -171,7 +171,7 @@ async def set_custom_thread_active(thread_id: str, active: bool) -> bool:
         logger.info(f"Thread {thread_id} active state changed: {old_state} -> {active}")
         return True
 
-def _normalise_list_val(v: Any) -> List[str]:
+def _normalise_list_val(v: Any) -> list[str]:
     if isinstance(v, str):
         return [v]
     if isinstance(v, list):
@@ -182,7 +182,7 @@ def _normalise_list_val(v: Any) -> List[str]:
 # ── Unified entity operations                                               #
 # --------------------------------------------------------------------------- #
 
-async def get_entity_entry(entity_type: str, entity_id: str) -> Optional[dict]:
+async def get_entity_entry(entity_type: str, entity_id: str) -> dict | None:
     """Get config entry for a thread or receiver by entity type and ID."""
     async with CONFIG_LOCK:
         return CONFIG.get(entity_type, {}).get(entity_id)
@@ -203,10 +203,10 @@ async def update_entity_config(entity_type: str, entity_id: str, new_cfg: dict) 
 
 async def mutate_entity_config_list(
     entity_type: str, entity_id: str, field: str,
-    *, add: Optional[List[str]] = None,
-    remove: Optional[List[str]] = None,
+    *, add: list[str] | None = None,
+    remove: list[str] | None = None,
     clear: bool = False
-) -> Tuple[bool, Optional[List[str]]]:
+) -> tuple[bool, list[str] | None]:
     """Mutate a list field in any entity's config. Works for both threads and receivers."""
     async with CONFIG_LOCK:
         entity = CONFIG.get(entity_type, {}).get(entity_id)
@@ -241,19 +241,19 @@ async def mutate_entity_config_list(
 async def update_custom_thread_config(thread_id: str, new_cfg: dict) -> bool:
     return await update_entity_config("threads", thread_id, new_cfg)
 
-async def mutate_custom_thread_config_list(thread_id: str, key: str, *, add: Optional[List[str]] = None,
-                                           remove: Optional[List[str]] = None, clear: bool = False) -> Tuple[bool, Optional[List[str]]]:
+async def mutate_custom_thread_config_list(thread_id: str, key: str, *, add: list[str] | None = None,
+                                           remove: list[str] | None = None, clear: bool = False) -> tuple[bool, list[str] | None]:
     return await mutate_entity_config_list("threads", thread_id, key, add=add, remove=remove, clear=clear)
 
 def _validate_receiver_key(key: str) -> bool:
     """Validate receiver key format: alphanumeric + underscores only."""
     return bool(re.match(r'^[a-zA-Z0-9_]+$', key))
 
-async def get_receiver_entry(key: str) -> Optional[dict]:
+async def get_receiver_entry(key: str) -> dict | None:
     """Get a receiver config entry by key."""
     return await get_entity_entry("receivers", key)
 
-async def create_receiver(key: str, name: str) -> Tuple[bool, str]:
+async def create_receiver(key: str, name: str) -> tuple[bool, str]:
     """
     Create a new receiver entry.
     Returns (success, message).
@@ -276,7 +276,7 @@ async def create_receiver(key: str, name: str) -> Tuple[bool, str]:
         logger.info(f"Created receiver '{key}' with name '{name}'")
     return True, f"Created receiver '{key}'"
 
-async def delete_receiver(key: str) -> Tuple[bool, str]:
+async def delete_receiver(key: str) -> tuple[bool, str]:
     """Delete a receiver entry."""
     async with CONFIG_LOCK:
         receivers = CONFIG.get("receivers", {})
@@ -287,7 +287,7 @@ async def delete_receiver(key: str) -> Tuple[bool, str]:
         logger.info(f"Deleted receiver '{key}'")
     return True, f"Deleted receiver '{key}'"
 
-async def set_receiver_active(key: str, active: bool) -> Tuple[bool, str]:
+async def set_receiver_active(key: str, active: bool) -> tuple[bool, str]:
     """Set receiver active state."""
     if active and key not in WEBHOOKS:
         return False, f"Cannot activate: no webhook URL for '{key}' in FEZ_WEBHOOKS"

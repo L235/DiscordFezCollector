@@ -1,13 +1,13 @@
 import discord
 from discord.ext import commands
 
-from src.logging_setup import logger
 from src.bot_instance import bot
 from src.commands.helpers import (
     FilterType,
     _require_custom_thread,
     mutate_filter,
 )
+from src.logging_setup import logger
 
 
 @bot.hybrid_command(name="track",

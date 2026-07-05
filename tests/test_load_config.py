@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import load_config, DEFAULT_CUSTOM_CONFIG
+from src.config import DEFAULT_CUSTOM_CONFIG, load_config
 from src.constants import CONFIG_VERSION
 
 
@@ -134,6 +134,8 @@ def test_load_default_returns_independent_dicts(isolated_state):
     # Load again — should be clean
     cfg2 = load_config()
     # The file now exists (written by first call), so this tests the file path.
-    # But the module-level DEFAULT_CONFIG must not have been mutated.
+    # The reload must not see the in-memory mutation, and the module-level
+    # DEFAULT_CONFIG must not have been mutated either.
+    assert "999" not in cfg2["threads"]
     from src.config import DEFAULT_CONFIG
     assert "999" not in DEFAULT_CONFIG.get("threads", {})

@@ -7,38 +7,37 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from datetime import UTC, datetime
 
 import discord
 import requests
 from pywikibot import config as pwb_config
 from pywikibot.comms.eventstreams import EventStreams
 
-from src.constants import (
-    DISCORD_MESSAGE_LIMIT,
-    TRUNCATION_RESERVE,
-    TRUNCATED_MESSAGE_SUFFIX,
-)
-from src.logging_setup import logger
-from src.models import EventStreamConfig, RetryConfig, CustomFilter
+from src.bot_instance import bot
 from src.config import (
     CONFIG,
     CONFIG_LOCK,
-    WEBHOOKS,
-    USER_AGENT,
     STALENESS_SECS,
-    set_receiver_errored,
+    USER_AGENT,
+    WEBHOOKS,
     set_custom_thread_active,
+    set_receiver_errored,
+)
+from src.constants import (
+    DISCORD_MESSAGE_LIMIT,
+    TRUNCATED_MESSAGE_SUFFIX,
+    TRUNCATION_RESERVE,
 )
 from src.discord_utils import (
+    TransientWebhookError,
+    WebhookError,
     discord_api_call_with_backoff,
     send_message_with_backoff,
     send_webhook_with_backoff,
-    WebhookError,
-    TransientWebhookError,
 )
-from src.bot_instance import bot
+from src.logging_setup import logger
+from src.models import CustomFilter, EventStreamConfig, RetryConfig
 
 # --------------------------------------------------------------------------- #
 # ── MediaWiki EventStreams setup                                             #
@@ -46,38 +45,46 @@ from src.bot_instance import bot
 
 pwb_config.user_agent_description = USER_AGENT
 
-# NOTE: We deliberately do *not* pass `since=`. Supplying a `since` timestamp
-# forces stream.wikimedia.org to perform a Kafka offset seek, which
-# intermittently returns HTTP 500 (~20-25% of connections, reproduced
-# directly). Since we always reconnected with `since=now` anyway, the seek
-# bought nothing over the live tail while causing the 500s. Omitting `since`
-# connects at the live tail, which never 500s. Brief reconnect gaps (a few
-# seconds, a few times a day) are well within the STALENESS_SECS tolerance.
-# Full analysis: https://github.com/L235/DiscordFezCollector/issues/46
-stream = EventStreams(
-    streams=["recentchange", "revision-create"],
-    headers={"user-agent": USER_AGENT},
-)
+STREAM_NAMES = ["recentchange", "revision-create"]
+
+
+def new_stream() -> EventStreams:
+    """Construct a fresh EventStreams connection at the live tail.
+
+    Constructed lazily (never at import time): pywikibot performs network
+    calls during construction, so creating the stream on import would block
+    module import — and the whole test suite — in any offline environment.
+
+    NOTE: We deliberately do *not* pass `since=`. Supplying a `since` timestamp
+    forces stream.wikimedia.org to perform a Kafka offset seek, which
+    intermittently returns HTTP 500 (~20-25% of connections, reproduced
+    directly). Since we always reconnected with `since=now` anyway, the seek
+    bought nothing over the live tail while causing the 500s. Omitting `since`
+    connects at the live tail, which never 500s. Brief reconnect gaps (a few
+    seconds, a few times a day) are well within the STALENESS_SECS tolerance.
+    Full analysis: https://github.com/L235/DiscordFezCollector/issues/46
+    """
+    return EventStreams(streams=STREAM_NAMES, headers={"user-agent": USER_AGENT})
 
 # --------------------------------------------------------------------------- #
 # ── Caches & runtime state                                                   #
 # --------------------------------------------------------------------------- #
 
 #  thread_id → (fingerprint, CustomFilter)
-FILTER_CACHE: Dict[int, Tuple[str, CustomFilter]] = {}
+FILTER_CACHE: dict[int, tuple[str, CustomFilter]] = {}
 #  thread_id → discord.Thread
-THREAD_CACHE: Dict[int, discord.Thread] = {}
+THREAD_CACHE: dict[int, discord.Thread] = {}
 #  receiver_key → (fingerprint, CustomFilter)
-RECEIVER_FILTER_CACHE: Dict[str, Tuple[str, CustomFilter]] = {}
+RECEIVER_FILTER_CACHE: dict[str, tuple[str, CustomFilter]] = {}
 #  Track last event received time (for health monitoring)
 _last_event_lock = threading.Lock()
-last_event_time: Optional[float] = None
+last_event_time: float | None = None
 
 def _fingerprint(cfg: dict) -> str:
     """Deterministic (& cheap) fingerprint for a config dict."""
     return json.dumps(cfg, sort_keys=True)
 
-def _event_ts_to_epoch(change: dict) -> Optional[float]:
+def _event_ts_to_epoch(change: dict) -> float | None:
     """
     Best-effort extraction of an event timestamp (UTC seconds).
 
@@ -113,7 +120,7 @@ def format_change(change: dict, *, link_style: str = "title") -> str:
     user = change['user']
     title = change.get("title", "(no title)")
     comment = change.get("comment") or "(no summary)"
-    
+
     if change["type"] == "log":
         log_comment = change.get("log_action_comment") or comment
         link = f"https://{change.get('server_name','')}/w/index.php?title=Special:Log&logid={change.get('log_id','')}"
@@ -128,7 +135,7 @@ def format_change(change: dict, *, link_style: str = "title") -> str:
 
     # For regular edits
     page_url = f"https://{change['server_name']}/wiki/{title.replace(' ', '_')}"
-    
+
     # Handle different change types that may or may not have revision info
     if change["type"] == "edit" and "revision" in change:
         diff_url = f"https://{change['server_name']}/w/index.php?diff={change['revision']['new']}"
@@ -186,7 +193,7 @@ def format_eventstream_timeout_notice(seconds: float) -> str:
     )
 
 
-async def _announce(channel: Optional[discord.TextChannel], text: str) -> None:
+async def _announce(channel: discord.TextChannel | None, text: str) -> None:
     """Best-effort post of an operator notice to the main channel; no-op when no
     channel is available. (send_message_with_backoff swallows its own errors.)"""
     if channel is not None:
@@ -194,7 +201,7 @@ async def _announce(channel: Optional[discord.TextChannel], text: str) -> None:
 
 
 async def _deactivate_dead_thread(
-    tid: int, exc: Exception, channel: Optional[discord.TextChannel]
+    tid: int, exc: Exception, channel: discord.TextChannel | None
 ) -> None:
     """Handle a custom thread that is permanently unsendable (deleted / access
     revoked): deactivate it and announce, so the silent stop is noticed. Stays
@@ -208,7 +215,7 @@ async def _deactivate_dead_thread(
         logger.error(f"Custom thread {tid} permanently unsendable ({reason}); deactivated")
         await _announce(channel, format_thread_disabled_notice(tid, reason))
 
-async def eventstream_health_monitor(channel: Optional[discord.TextChannel] = None):
+async def eventstream_health_monitor(channel: discord.TextChannel | None = None):
     """
     Monitor the health of the EventStream connection.
     If no events are received within EventStreamConfig.TIMEOUT_SECS, assume the
@@ -221,13 +228,13 @@ async def eventstream_health_monitor(channel: Optional[discord.TextChannel] = No
         f"EventStream health monitor started (timeout: {EventStreamConfig.TIMEOUT_SECS}s, "
         f"check interval: {EventStreamConfig.CHECK_INTERVAL_SECS}s)"
     )
-    
+
     # Give the stream some time to initialize before monitoring
     await asyncio.sleep(EventStreamConfig.CHECK_INTERVAL_SECS)
-    
+
     while True:
         await asyncio.sleep(EventStreamConfig.CHECK_INTERVAL_SECS)
-        
+
         with _last_event_lock:
             snapshot = last_event_time
 
@@ -236,7 +243,7 @@ async def eventstream_health_monitor(channel: Optional[discord.TextChannel] = No
             continue
 
         time_since_last_event = time.time() - snapshot
-        
+
         if time_since_last_event > EventStreamConfig.TIMEOUT_SECS:
             logger.error(
                 f"EventStream TIMEOUT: No events received for {time_since_last_event:.0f}s "
@@ -258,7 +265,7 @@ async def stream_worker(channel: discord.TextChannel):
     logger.info("Starting EventStreams worker")
     loop = asyncio.get_running_loop()
 
-    async def active_custom_filters() -> List[Tuple[int, CustomFilter]]:
+    async def active_custom_filters() -> list[tuple[int, CustomFilter]]:
         """
         Return list of (thread_id, CustomFilter) for **active** custom threads,
         rebuilding a filter only if its config actually changed.
@@ -266,7 +273,7 @@ async def stream_worker(channel: discord.TextChannel):
         async with CONFIG_LOCK:
             snapshot = list(CONFIG["threads"].items())
 
-        out: List[Tuple[int, CustomFilter]] = []
+        out: list[tuple[int, CustomFilter]] = []
         for tid_str, entry in snapshot:
             if not entry.get("active", False):
                 FILTER_CACHE.pop(int(tid_str), None)
@@ -285,7 +292,7 @@ async def stream_worker(channel: discord.TextChannel):
             logger.debug("Found %d active custom filters", len(out))
         return out
 
-    async def active_receiver_filters() -> List[Tuple[str, CustomFilter]]:
+    async def active_receiver_filters() -> list[tuple[str, CustomFilter]]:
         """
         Return list of (receiver_key, CustomFilter) for **active** receivers,
         rebuilding a filter only if its config actually changed.
@@ -293,7 +300,7 @@ async def stream_worker(channel: discord.TextChannel):
         async with CONFIG_LOCK:
             snapshot = list(CONFIG.get("receivers", {}).items())
 
-        out: List[Tuple[str, CustomFilter]] = []
+        out: list[tuple[str, CustomFilter]] = []
         for key, entry in snapshot:
             # Skip inactive or errored receivers, or those without webhook URLs
             if not entry.get("active", False) or entry.get("errored", False):
@@ -315,7 +322,7 @@ async def stream_worker(channel: discord.TextChannel):
             logger.debug("Found %d active receiver filters", len(out))
         return out
 
-    async def get_thread_obj(tid: int) -> Optional[discord.Thread]:
+    async def get_thread_obj(tid: int) -> discord.Thread | None:
         """Return cached discord.Thread or fetch & cache it."""
         th = THREAD_CACHE.get(tid)
         if th is not None:
@@ -342,29 +349,31 @@ async def stream_worker(channel: discord.TextChannel):
     # asyncio event-loop never stalls on network reads.  A bounded queue
     # provides back-pressure if Discord throttles us.
     # ------------------------------------------------------------------ #
-    event_queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=EventStreamConfig.QUEUE_MAX_SIZE)
+    event_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=EventStreamConfig.QUEUE_MAX_SIZE)
 
     def _producer():
         """
         Blocking producer: iterates EventStreams and enqueues messages.
         Adds simple exponential backoff on errors and logs 403 bodies.
-        
+
         This runs in a daemon thread to avoid blocking the async event loop.
         Updates global last_event_time on each successful event.
         """
         retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS
         max_retry_backoff_seconds = RetryConfig.MAX_BACKOFF_SECS
-        global stream
+        stream: EventStreams | None = None
         while True:
             try:
+                if stream is None:
+                    stream = new_stream()
                 for evt in stream:
                     global last_event_time
                     retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS  # reset on success
-                    
+
                     # Update heartbeat timestamp
                     with _last_event_lock:
                         last_event_time = time.time()
-                    
+
                     # Put event in queue with timeout to detect blocking
                     if loop.is_closed():
                         logger.info("Event loop closed; producer thread exiting")
@@ -391,12 +400,9 @@ async def stream_worker(channel: discord.TextChannel):
                             return
                         logger.error(f"Failed to enqueue event: {e}")
                 # Iterator ended unexpectedly; reinit at the live tail.
-                # (No `since=` — see note at module-level stream construction.)
+                # (No `since=` — see note on new_stream().)
                 logger.warning("EventStreams iterator ended; reinitializing")
-                stream = EventStreams(
-                    streams=["recentchange", "revision-create"],
-                    headers={"user-agent": USER_AGENT},
-                )
+                stream = new_stream()
             except requests.HTTPError as e:
                 status = getattr(e.response, "status_code", None)
                 body = None
@@ -415,13 +421,9 @@ async def stream_worker(channel: discord.TextChannel):
                     logger.info("Event loop closed; producer thread exiting")
                     return
                 retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
-                # Reinitialize at the live tail.
-                # (No `since=` — see note at module-level stream construction.)
+                # Reinitialize at the live tail. (No `since=` — see new_stream().)
                 try:
-                    stream = EventStreams(
-                        streams=["recentchange", "revision-create"],
-                        headers={"user-agent": USER_AGENT},
-                    )
+                    stream = new_stream()
                 except Exception as e2:
                     logger.exception("Reinit after HTTP error failed: %r", e2)
                     # If we can't reinitialize, the stream is broken
@@ -461,10 +463,10 @@ async def stream_worker(channel: discord.TextChannel):
             # To avoid log spam, gate on an attribute.
             if not getattr(stream_worker, "_warned_missing_ts", False):
                 logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
-                setattr(stream_worker, "_warned_missing_ts", True)
+                stream_worker._warned_missing_ts = True
             stale = False
         else:
-            current_time = datetime.now(timezone.utc).timestamp()
+            current_time = datetime.now(UTC).timestamp()
             stale = (current_time - ts) > STALENESS_SECS
 
         # Some events may lack user (rare for rc, common for revision-create)
@@ -480,8 +482,8 @@ async def stream_worker(channel: discord.TextChannel):
         # Determine routing targets: (thread_id, messageable, link_style) tuples.
         # The thread_id is carried so a failed send can evict the cached thread
         # object (see the send loop below).
-        targets: List[Tuple[int, discord.abc.Messageable, str]] = []
-        receiver_targets: List[Tuple[str, str]] = []  # (key, link_style)
+        targets: list[tuple[int, discord.abc.Messageable, str]] = []
+        receiver_targets: list[tuple[str, str]] = []  # (key, link_style)
 
         # Custom threads and receivers
         customs = await active_custom_filters()
@@ -529,15 +531,17 @@ async def stream_worker(channel: discord.TextChannel):
             event_queue.task_done()
             continue  # nothing to do
 
-        # Cache formatted messages by link_style to avoid re-formatting
-        _msg_cache: Dict[str, str] = {}
-        def _get_msg(style: str, _change: dict = change) -> str:
-            if style not in _msg_cache:
+        # Cache formatted messages by link_style to avoid re-formatting.
+        # (Default args bind the current event's values eagerly.)
+        msg_cache: dict[str, str] = {}
+
+        def _get_msg(style: str, _change: dict = change, _cache: dict[str, str] = msg_cache) -> str:
+            if style not in _cache:
                 msg = format_change(_change, link_style=style)
                 if len(msg) > DISCORD_MESSAGE_LIMIT:
                     msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_RESERVE] + TRUNCATED_MESSAGE_SUFFIX
-                _msg_cache[style] = msg
-            return _msg_cache[style]
+                _cache[style] = msg
+            return _cache[style]
 
         # Send to thread targets with rate limit handling
         if logger.isEnabledFor(logging.DEBUG):

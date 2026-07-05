@@ -1,27 +1,26 @@
-import json
 import io
+import json
 
 import discord
 from discord.ext import commands
 
-from src.logging_setup import logger
 from src.bot_instance import bot
-from src.constants import JSON_INDENT, UTF8_ENCODING
+from src.commands.helpers import (
+    _deepcopy_cfg,
+    _parse_json_arg,
+    _require_custom_thread,
+    authorised,
+)
 from src.config import (
     CONFIG,
     CONFIG_LOCK,
+    _normalise_list_val,
+    mutate_custom_thread_config_list,
     save_config,
     update_custom_thread_config,
-    mutate_custom_thread_config_list,
-    _normalise_list_val,
 )
-from src.commands.helpers import (
-    authorised,
-    _require_custom_thread,
-    _parse_json_arg,
-    _deepcopy_cfg,
-)
-
+from src.constants import JSON_INDENT, UTF8_ENCODING
+from src.logging_setup import logger
 
 # ── /globalconfig ─────────────────────────────────────────────────────────── #
 
