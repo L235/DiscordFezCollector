@@ -24,11 +24,6 @@ from src.config import (
     set_custom_thread_active,
     set_receiver_errored,
 )
-from src.constants import (
-    DISCORD_MESSAGE_LIMIT,
-    TRUNCATED_MESSAGE_SUFFIX,
-    TRUNCATION_RESERVE,
-)
 from src.discord_utils import (
     TransientWebhookError,
     WebhookError,
@@ -38,6 +33,7 @@ from src.discord_utils import (
 )
 from src.logging_setup import logger
 from src.models import CustomFilter, EventStreamConfig, RetryConfig
+from src.routing import fast_reject, match_filters, truncate_for_discord
 
 # --------------------------------------------------------------------------- #
 # ── MediaWiki EventStreams setup                                             #
@@ -483,49 +479,23 @@ async def stream_worker(channel: discord.TextChannel):
         # The thread_id is carried so a failed send can evict the cached thread
         # object (see the send loop below).
         targets: list[tuple[int, discord.abc.Messageable, str]] = []
-        receiver_targets: list[tuple[str, str]] = []  # (key, link_style)
 
         # Custom threads and receivers
         customs = await active_custom_filters()
         receivers = await active_receiver_filters()
 
-        # ----------  (#2) ultra-cheap global short-circuit ---------------- #
-        # Combine filters from both threads and receivers for fast-reject
-        all_filters = [f for _, f in customs] + [f for _, f in receivers]
-        user_whitelist = {u for f in all_filters for u in f.user_include}
-        page_regexes = [f.page_include for f in all_filters if f.page_include]
-        summary_regexes = [f.sum_include for f in all_filters if f.sum_include]
-
-        title = change.get("title", "")
-        comment = change.get("log_action_comment") or change.get("comment") or ""
-
-        if (
-            change["user"] not in user_whitelist
-            and not any(rx.search(title) for rx in page_regexes)
-            and not any(rx.search(comment) for rx in summary_regexes)
-        ):
+        # Ultra-cheap global short-circuit across all filters, then per-target
+        # matching (both pure — see src/routing.py).
+        if fast_reject(change, [f for _, f in customs] + [f for _, f in receivers]):
             event_queue.task_done()
             continue  # fast reject before any regex-heavy work
 
-        # Match against thread filters
-        if customs:
-            for tid, filt in customs:
-                try:
-                    if filt.matches(change):
-                        th = await get_thread_obj(tid)
-                        if th is not None:
-                            targets.append((tid, th, filt.link_style))
-                except Exception as e:  # pragma: no cover
-                    logger.warning(f"Custom filter error for {tid}: {e}")
+        for tid, style in match_filters(change, customs, "Custom filter error for"):
+            th = await get_thread_obj(tid)
+            if th is not None:
+                targets.append((tid, th, style))
 
-        # Match against receiver filters
-        if receivers:
-            for key, filt in receivers:
-                try:
-                    if filt.matches(change):
-                        receiver_targets.append((key, filt.link_style))
-                except Exception as e:
-                    logger.warning(f"Receiver filter error for '{key}': {e}")
+        receiver_targets = match_filters(change, receivers, "Receiver filter error for")
 
         if not targets and not receiver_targets:
             event_queue.task_done()
@@ -537,10 +507,7 @@ async def stream_worker(channel: discord.TextChannel):
 
         def _get_msg(style: str, _change: dict = change, _cache: dict[str, str] = msg_cache) -> str:
             if style not in _cache:
-                msg = format_change(_change, link_style=style)
-                if len(msg) > DISCORD_MESSAGE_LIMIT:
-                    msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_RESERVE] + TRUNCATED_MESSAGE_SUFFIX
-                _cache[style] = msg
+                _cache[style] = truncate_for_discord(format_change(_change, link_style=style))
             return _cache[style]
 
         # Send to thread targets with rate limit handling
