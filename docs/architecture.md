@@ -14,9 +14,11 @@ servers). A single owner configures everything through Discord commands.
 | `src/bot_instance.py` | The `discord.ext.commands.Bot` singleton. |
 | `src/config.py` | Env vars, webhook-URL parsing, persistent JSON config (load/save + all mutation helpers, guarded by `CONFIG_LOCK`). |
 | `src/constants.py` | Version and Discord message-limit constants. |
-| `src/models.py` | `CustomFilter` (compiled include/exclude matcher) and retry/timeout settings classes. |
+| `src/models.py` | `FilterConfig` (the filter schema + (de)serialization) and `CustomFilter` (compiled include/exclude matcher). |
+| `src/settings.py` | Retry/backoff/timeout tuning knobs, env-overridable. |
 | `src/routing.py` | Pure routing decisions: global fast-reject, per-filter matching, message truncation. No I/O. |
-| `src/event_streams.py` | The event pipeline (producer thread → queue → consumer loop), message formatting, health monitor, operator notices. |
+| `src/formatting.py` | Pure message building: `format_change` and the operator notices. |
+| `src/event_streams.py` | The event pipeline: `producer_loop` (daemon thread + reconnect policy), `stream_worker`/`_process_event` (consumer), `_dispatch` (sends + auto-disable), `FilterRegistry` caches, health monitor, `terminate_process`. |
 | `src/discord_utils.py` | Discord send wrappers with 5xx retry; webhook error classification (permanent `WebhookError` vs `TransientWebhookError`). |
 | `src/commands/` | Command handlers, split by domain (threads, receivers, config, filters, help) plus shared helpers. |
 | `src/logging_setup.py` | Rotating file + stdout logging. |

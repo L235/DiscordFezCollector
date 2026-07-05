@@ -1,6 +1,6 @@
 """Tests for format_change with link_style parameter."""
 
-from src.event_streams import format_change
+from src.formatting import format_change
 
 # ── Fixtures ──────────────────────────────────────────────────────────────── #
 

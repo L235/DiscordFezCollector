@@ -1,3 +1,17 @@
+"""The event pipeline: Wikimedia EventStreams → filters → Discord targets.
+
+Structure (see docs/architecture.md):
+
+- producer_loop()   — daemon thread; tails the blocking SSE iterator, owns the
+                      reconnect/backoff policy, feeds the asyncio queue.
+- stream_worker()   — async consumer; one _process_event() call per event.
+- _process_event()  — staleness gate → pure routing (src/routing.py) →
+                      _dispatch().
+- _dispatch()       — formats once per link style and sends to matched
+                      threads/webhooks, handling eviction and auto-disable.
+- eventstream_health_monitor() — restarts the process when the stream stalls.
+"""
+
 import asyncio
 import concurrent.futures
 import json
@@ -8,6 +22,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
+from typing import NoReturn, TypeVar
 
 import discord
 import requests
@@ -30,6 +45,12 @@ from src.discord_utils import (
     discord_api_call_with_backoff,
     send_message_with_backoff,
     send_webhook_with_backoff,
+)
+from src.formatting import (
+    format_change,
+    format_eventstream_timeout_notice,
+    format_receiver_disabled_notice,
+    format_thread_disabled_notice,
 )
 from src.logging_setup import logger
 from src.models import CustomFilter
@@ -63,23 +84,72 @@ def new_stream() -> EventStreams:
     """
     return EventStreams(streams=STREAM_NAMES, headers={"user-agent": USER_AGENT})
 
+
+def terminate_process(reason: str) -> NoReturn:
+    """Restart-by-suicide: the external process manager restarts us.
+
+    Sends SIGTERM (which main()'s handler turns into a graceful exit), waits
+    out a grace period, then force-exits if the process is somehow still
+    alive. The time.sleep is deliberate even on the event-loop path: the
+    process is dying, and the SIGTERM handler interrupts the sleep anyway.
+    """
+    logger.error(f"Terminating process: {reason}")
+    os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(RetryConfig.GRACE_PERIOD_SECS)
+    sys.exit(1)
+
+
 # --------------------------------------------------------------------------- #
 # ── Caches & runtime state                                                   #
 # --------------------------------------------------------------------------- #
 
-#  thread_id → (fingerprint, CustomFilter)
-FILTER_CACHE: dict[int, tuple[str, CustomFilter]] = {}
-#  thread_id → discord.Thread
-THREAD_CACHE: dict[int, discord.Thread] = {}
-#  receiver_key → (fingerprint, CustomFilter)
-RECEIVER_FILTER_CACHE: dict[str, tuple[str, CustomFilter]] = {}
-#  Track last event received time (for health monitoring)
-_last_event_lock = threading.Lock()
-last_event_time: float | None = None
+K = TypeVar("K")  # filter-target key: thread id (int) or receiver key (str)
+
 
 def _fingerprint(cfg: dict) -> str:
     """Deterministic (& cheap) fingerprint for a config dict."""
     return json.dumps(cfg, sort_keys=True)
+
+
+class FilterRegistry:
+    """Compiled-filter cache keyed by target, rebuilt only on config change.
+
+    Compiling a CustomFilter means building regexes, so we fingerprint the
+    raw config dict and reuse the compiled filter until the config differs.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[K, tuple[str, CustomFilter]] = {}
+
+    def get(self, key: K, cfg: dict) -> CustomFilter:
+        fp = _fingerprint(cfg)
+        cached = self._cache.get(key)
+        if cached and cached[0] == fp:
+            return cached[1]
+        filt = CustomFilter(cfg)
+        self._cache[key] = (fp, filt)
+        return filt
+
+    def evict(self, key: K) -> None:
+        self._cache.pop(key, None)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+
+THREAD_FILTERS = FilterRegistry()
+RECEIVER_FILTERS = FilterRegistry()
+
+#  thread_id → discord.Thread
+THREAD_CACHE: dict[int, discord.Thread] = {}
+
+#  Track last event received time (for health monitoring)
+_last_event_lock = threading.Lock()
+last_event_time: float | None = None
+
+#  Warn only once about events that carry no usable timestamp
+_warned_missing_ts = False
+
 
 def _event_ts_to_epoch(change: dict) -> float | None:
     """
@@ -106,89 +176,66 @@ def _event_ts_to_epoch(change: dict) -> float | None:
             pass
     return None
 
-def format_change(change: dict, *, link_style: str = "title") -> str:
-    """Turn one EventStreams record into a concise Discord message.
 
-    Args:
-        change: The EventStreams change record.
-        link_style: "title" to link the page title (default),
-                    "action" to link the action verb instead.
-    """
-    user = change['user']
-    title = change.get("title", "(no title)")
-    comment = change.get("comment") or "(no summary)"
-
-    if change["type"] == "log":
-        log_comment = change.get("log_action_comment") or comment
-        link = f"https://{change.get('server_name','')}/w/index.php?title=Special:Log&logid={change.get('log_id','')}"
-
-        # Better linking for AbuseFilter hits
-        if change.get("log_type") == "abusefilter" and change.get("log_action") == "hit":
-            log_params = change.get("log_params")
-            if isinstance(log_params, dict) and "log" in log_params:
-                link = f"https://{change.get('server_name','')}/wiki/Special:AbuseLog/{log_params['log']}"
-
-        return f"**{user}** {log_comment} \n<{link}>"
-
-    # For regular edits
-    page_url = f"https://{change['server_name']}/wiki/{title.replace(' ', '_')}"
-
-    # Handle different change types that may or may not have revision info
-    if change["type"] == "edit" and "revision" in change:
-        diff_url = f"https://{change['server_name']}/w/index.php?diff={change['revision']['new']}"
-        if link_style == "action":
-            return f"**{user}** [edited](<{diff_url}>) **[{title}](<{page_url}>)** ({comment})"
-        return f"**{user}** edited **[{title}](<{page_url}>)** ({comment}) \n<{diff_url}>"
-    elif change["type"] == "new":
-        if link_style == "action":
-            return f"**{user}** [created](<{page_url}>) **{title}** ({comment})"
-        return f"**{user}** created **[{title}](<{page_url}>)** ({comment})"
-    elif change["type"] == "categorize":
-        if link_style == "action":
-            return f"**{user}** [categorized](<{page_url}>) **{title}** ({comment})"
-        return f"**{user}** categorized **[{title}](<{page_url}>)** ({comment})"
-    else:
-        # Fallback for other change types
-        if link_style == "action":
-            return f"**{user}** [modified](<{page_url}>) **{title}** ({comment})"
-        return f"**{user}** modified **[{title}](<{page_url}>)** ({comment})"
-
-def format_receiver_disabled_notice(key: str, reason: str) -> str:
-    """Build the main-channel notice posted when a receiver is auto-disabled.
-
-    Surfaces the silent failure: which receiver, why, and how to recover — so a
-    permanently-broken webhook is noticed instead of dying quietly.
-    """
-    return (
-        f"⚠️ Receiver **{key}** was automatically disabled after a webhook "
-        f"failure: {reason}\nReactivate with `/receiver activate {key}` once the "
-        f"webhook is fixed."
-    )
+def _is_stale(change: dict) -> bool:
+    """True when the event is older than STALENESS_SECS. Events without a
+    usable timestamp are treated as fresh (warned once, not per event)."""
+    global _warned_missing_ts
+    ts = _event_ts_to_epoch(change)
+    if ts is None:
+        if not _warned_missing_ts:
+            logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
+            _warned_missing_ts = True
+        return False
+    return (datetime.now(UTC).timestamp() - ts) > STALENESS_SECS
 
 
-def format_thread_disabled_notice(thread_id: int, reason: str) -> str:
-    """Build the main-channel notice posted when a custom thread is auto-disabled
-    because it became permanently unsendable (deleted / no access)."""
-    return (
-        f"⚠️ Custom thread <#{thread_id}> (`{thread_id}`) was automatically "
-        f"deactivated: {reason}\nRecreate the thread (or restore access) to "
-        f"resume routing."
-    )
+# --------------------------------------------------------------------------- #
+# ── Active-filter snapshots                                                  #
+# --------------------------------------------------------------------------- #
+
+async def active_custom_filters() -> list[tuple[int, CustomFilter]]:
+    """(thread_id, CustomFilter) for **active** custom threads."""
+    async with CONFIG_LOCK:
+        snapshot = list(CONFIG["threads"].items())
+
+    out: list[tuple[int, CustomFilter]] = []
+    for tid_str, entry in snapshot:
+        tid = int(tid_str)
+        if not entry.get("active", False):
+            THREAD_FILTERS.evict(tid)
+            continue
+        out.append((tid, THREAD_FILTERS.get(tid, entry["config"])))
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Found %d active custom filters", len(out))
+    return out
 
 
-def format_startup_notice() -> str:
-    """Build the main-channel notice posted once when the bot (re)starts."""
-    return "✅ **DiscordFezCollector** started and connected to Wikimedia EventStreams."
+async def active_receiver_filters() -> list[tuple[str, CustomFilter]]:
+    """(receiver_key, CustomFilter) for **active**, non-errored receivers
+    that have a webhook URL configured."""
+    async with CONFIG_LOCK:
+        snapshot = list(CONFIG.get("receivers", {}).items())
+
+    out: list[tuple[str, CustomFilter]] = []
+    for key, entry in snapshot:
+        if not entry.get("active", False) or entry.get("errored", False):
+            RECEIVER_FILTERS.evict(key)
+            continue
+        if key not in WEBHOOKS:
+            logger.warning(f"Receiver '{key}' active but no webhook URL in env")
+            continue
+        out.append((key, RECEIVER_FILTERS.get(key, entry["config"])))
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Found %d active receiver filters", len(out))
+    return out
 
 
-def format_eventstream_timeout_notice(seconds: float) -> str:
-    """Build the main-channel notice posted before the process restarts itself
-    because the Wikimedia stream went silent."""
-    return (
-        f"⚠️ No Wikimedia events received for {int(seconds)}s — the stream looks "
-        f"stalled; restarting the bot to recover."
-    )
-
+# --------------------------------------------------------------------------- #
+# ── Operator notices & dead-thread handling                                  #
+# --------------------------------------------------------------------------- #
 
 async def _announce(channel: discord.TextChannel | None, text: str) -> None:
     """Best-effort post of an operator notice to the main channel; no-op when no
@@ -211,6 +258,34 @@ async def _deactivate_dead_thread(
     if await set_custom_thread_active(str(tid), False):
         logger.error(f"Custom thread {tid} permanently unsendable ({reason}); deactivated")
         await _announce(channel, format_thread_disabled_notice(tid, reason))
+
+
+async def get_thread_obj(tid: int, channel: discord.TextChannel | None) -> discord.Thread | None:
+    """Return cached discord.Thread or fetch & cache it."""
+    th = THREAD_CACHE.get(tid)
+    if th is not None:
+        return th
+    try:
+        ch = await discord_api_call_with_backoff(bot.fetch_channel, tid)
+    except (discord.NotFound, discord.Forbidden) as e:
+        THREAD_CACHE.pop(tid, None)
+        await _deactivate_dead_thread(tid, e, channel)
+        return None
+    except discord.HTTPException as e:
+        logger.warning(f"Failed to fetch channel {tid}: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"Unexpected error fetching channel {tid}: {e}")
+        return None
+    if isinstance(ch, discord.Thread):
+        THREAD_CACHE[tid] = ch
+        return ch
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# ── Health monitor                                                           #
+# --------------------------------------------------------------------------- #
 
 async def eventstream_health_monitor(channel: discord.TextChannel | None = None):
     """
@@ -242,314 +317,219 @@ async def eventstream_health_monitor(channel: discord.TextChannel | None = None)
         time_since_last_event = time.time() - snapshot
 
         if time_since_last_event > EventStreamConfig.TIMEOUT_SECS:
-            logger.error(
-                f"EventStream TIMEOUT: No events received for {time_since_last_event:.0f}s "
-                f"(threshold: {EventStreamConfig.TIMEOUT_SECS}s). Terminating process for restart."
-            )
             # Announce before dying (best-effort; runs in the async loop so the
             # send can complete before SIGTERM tears the loop down).
             await _announce(channel, format_eventstream_timeout_notice(time_since_last_event))
-            # Terminate the process - external process manager should restart it
-            os.kill(os.getpid(), signal.SIGTERM)
-            await asyncio.sleep(RetryConfig.GRACE_PERIOD_SECS)  # Grace period
-            sys.exit(1)  # Force exit if SIGTERM didn't work
+            terminate_process(
+                f"EventStream TIMEOUT: no events received for {time_since_last_event:.0f}s "
+                f"(threshold: {EventStreamConfig.TIMEOUT_SECS}s)"
+            )
+
+
+# --------------------------------------------------------------------------- #
+# ── Producer (daemon thread)                                                 #
+# --------------------------------------------------------------------------- #
+
+def producer_loop(loop: asyncio.AbstractEventLoop, event_queue: "asyncio.Queue[dict]") -> None:
+    """
+    Blocking producer: iterates EventStreams and enqueues events onto the
+    asyncio queue, with exponential backoff and reconnection on errors.
+
+    Runs in a daemon thread so it cannot keep the process alive after the
+    event loop closes (e.g. during redeploys); every sleep/enqueue path
+    re-checks loop.is_closed() before touching the loop.
+
+    Updates the module-level last_event_time heartbeat on each event.
+    """
+    global last_event_time
+    retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS
+    max_retry_backoff_seconds = RetryConfig.MAX_BACKOFF_SECS
+    stream: EventStreams | None = None
+    while True:
+        try:
+            if stream is None:
+                stream = new_stream()
+            for evt in stream:
+                retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS  # reset on success
+
+                # Update heartbeat timestamp
+                with _last_event_lock:
+                    last_event_time = time.time()
+
+                # Put event in queue with timeout to detect blocking
+                if loop.is_closed():
+                    logger.info("Event loop closed; producer thread exiting")
+                    return
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        asyncio.wait_for(event_queue.put(evt), timeout=EventStreamConfig.QUEUE_PUT_TIMEOUT_SECS),
+                        loop
+                    )
+                    future.result(timeout=EventStreamConfig.QUEUE_RESULT_TIMEOUT_SECS)
+                except concurrent.futures.TimeoutError:
+                    logger.error(
+                        "Queue.put() timed out - queue may be blocked. "
+                        f"Queue size: {event_queue.qsize()}/{event_queue.maxsize}"
+                    )
+                    # Critical failure: the processing pipeline is stuck.
+                    terminate_process("blocked event queue")
+                except Exception as e:
+                    if loop.is_closed():
+                        logger.info("Event loop closed; producer thread exiting")
+                        return
+                    logger.error(f"Failed to enqueue event: {e}")
+            # Iterator ended unexpectedly; reinit at the live tail.
+            # (No `since=` — see note on new_stream().)
+            logger.warning("EventStreams iterator ended; reinitializing")
+            stream = new_stream()
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            body = None
+            try:
+                if getattr(e, "response", None) is not None:
+                    body = e.response.text
+            except Exception:
+                body = None
+            if status == 403:
+                logger.error("EventStreams HTTP 403. Body:\n%s", (body or "(no body)")[:EventStreamConfig.ERROR_BODY_LIMIT])
+            else:
+                logger.error("EventStreams HTTP error %s. Body:\n%s", status, (body or "(no body)")[:EventStreamConfig.ERROR_BODY_LIMIT])
+            logger.info("Retrying after %ds", retry_backoff_seconds)
+            time.sleep(retry_backoff_seconds)
+            if loop.is_closed():
+                logger.info("Event loop closed; producer thread exiting")
+                return
+            retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
+            # Reinitialize at the live tail. (No `since=` — see new_stream().)
+            try:
+                stream = new_stream()
+            except Exception as e2:
+                logger.exception("Reinit after HTTP error failed: %r", e2)
+                terminate_process("unable to reinitialize EventStream after HTTP error")
+        except Exception as e:
+            logger.exception("EventStreams error: %r; retrying in %ds", e, retry_backoff_seconds)
+            time.sleep(retry_backoff_seconds)
+            if loop.is_closed():
+                logger.info("Event loop closed; producer thread exiting")
+                return
+            retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
+            # If backoff has reached max, we're in a persistent failure state
+            if retry_backoff_seconds >= max_retry_backoff_seconds:
+                terminate_process(
+                    f"EventStream failing persistently (backoff reached {max_retry_backoff_seconds}s)"
+                )
+
+
+# --------------------------------------------------------------------------- #
+# ── Consumer                                                                 #
+# --------------------------------------------------------------------------- #
+
+async def _dispatch(
+    change: dict,
+    targets: list[tuple[int, discord.abc.Messageable, str]],
+    receiver_targets: list[tuple[str, str]],
+    channel: discord.TextChannel | None,
+) -> None:
+    """Send one event to its matched thread and webhook targets."""
+    # Format at most once per link style.
+    msg_cache: dict[str, str] = {}
+
+    def _get_msg(style: str) -> str:
+        if style not in msg_cache:
+            msg_cache[style] = truncate_for_discord(format_change(change, link_style=style))
+        return msg_cache[style]
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "Sending change to %d thread(s) and %d receiver(s)",
+            len(targets),
+            len(receiver_targets),
+        )
+
+    for tid, tgt, style in targets:
+        sent = await send_message_with_backoff(tgt, _get_msg(style))
+        if sent is None:
+            # Send to a cached thread failed (deleted, access revoked, or a
+            # transient blip). Evict it so the next matching event misses the
+            # cache and re-runs get_thread_obj's classification: a successful
+            # refetch means it was transient (re-cached, no harm); a
+            # NotFound/Forbidden deactivates the thread and announces it.
+            # Without this, a thread that goes permanently unsendable while
+            # cached would drop every event silently.
+            THREAD_CACHE.pop(tid, None)
+
+    for key, style in receiver_targets:
+        webhook_url = WEBHOOKS.get(key)
+        if not webhook_url:
+            logger.warning(f"Receiver '{key}' matched but no webhook URL")
+            continue
+        try:
+            await send_webhook_with_backoff(webhook_url, _get_msg(style), key)
+        except WebhookError as e:
+            # Permanent failure (404/403/401/bad URL): disable the receiver
+            # so it stops trying a webhook that cannot succeed, and announce
+            # it in the main channel so the silent death gets noticed.
+            logger.error(f"Webhook error for receiver '{key}': {e}")
+            await set_receiver_errored(key)
+            await _announce(channel, format_receiver_disabled_notice(key, str(e)))
+        except TransientWebhookError as e:
+            # Recoverable failure (5xx/network/timeout): drop this one event
+            # but keep the receiver active so a passing hiccup cannot silence
+            # it indefinitely. (Already logged at WARNING in the sender.)
+            logger.debug(f"Transient webhook failure for receiver '{key}': {e}")
+
+
+async def _process_event(change: dict, channel: discord.TextChannel | None) -> None:
+    """Route one event: staleness gate → pure matching → dispatch."""
+    if _is_stale(change):
+        return
+    # Some events may lack user (rare for rc, common for revision-create);
+    # nothing sensible to route.
+    if not change.get("user"):
+        return
+
+    customs = await active_custom_filters()
+    receivers = await active_receiver_filters()
+
+    # Ultra-cheap global short-circuit before any regex-heavy work.
+    if fast_reject(change, [f for _, f in customs] + [f for _, f in receivers]):
+        return
+
+    # The thread_id is carried so a failed send can evict the cached thread
+    # object (see _dispatch).
+    targets: list[tuple[int, discord.abc.Messageable, str]] = []
+    for tid, style in match_filters(change, customs, "Custom filter error for"):
+        th = await get_thread_obj(tid, channel)
+        if th is not None:
+            targets.append((tid, th, style))
+
+    receiver_targets = match_filters(change, receivers, "Receiver filter error for")
+
+    if targets or receiver_targets:
+        await _dispatch(change, targets, receiver_targets, channel)
+
 
 async def stream_worker(channel: discord.TextChannel):
     """
-    Background task: tail MediaWiki EventStreams and route posts to **active
-    custom threads**.  (Per-user routing removed in v0.7.)
+    Background task: start the producer thread and route each incoming
+    Wikimedia event to matching custom threads and webhook receivers.
     """
     logger.info("Starting EventStreams worker")
     loop = asyncio.get_running_loop()
 
-    async def active_custom_filters() -> list[tuple[int, CustomFilter]]:
-        """
-        Return list of (thread_id, CustomFilter) for **active** custom threads,
-        rebuilding a filter only if its config actually changed.
-        """
-        async with CONFIG_LOCK:
-            snapshot = list(CONFIG["threads"].items())
-
-        out: list[tuple[int, CustomFilter]] = []
-        for tid_str, entry in snapshot:
-            if not entry.get("active", False):
-                FILTER_CACHE.pop(int(tid_str), None)
-                continue
-            tid = int(tid_str)
-            fp = _fingerprint(entry["config"])
-            cached = FILTER_CACHE.get(tid)
-            if cached and cached[0] == fp:
-                filt = cached[1]
-            else:
-                filt = CustomFilter(entry["config"])
-                FILTER_CACHE[tid] = (fp, filt)
-            out.append((tid, filt))
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Found %d active custom filters", len(out))
-        return out
-
-    async def active_receiver_filters() -> list[tuple[str, CustomFilter]]:
-        """
-        Return list of (receiver_key, CustomFilter) for **active** receivers,
-        rebuilding a filter only if its config actually changed.
-        """
-        async with CONFIG_LOCK:
-            snapshot = list(CONFIG.get("receivers", {}).items())
-
-        out: list[tuple[str, CustomFilter]] = []
-        for key, entry in snapshot:
-            # Skip inactive or errored receivers, or those without webhook URLs
-            if not entry.get("active", False) or entry.get("errored", False):
-                RECEIVER_FILTER_CACHE.pop(key, None)
-                continue
-            if key not in WEBHOOKS:
-                logger.warning(f"Receiver '{key}' active but no webhook URL in env")
-                continue
-            fp = _fingerprint(entry["config"])
-            cached = RECEIVER_FILTER_CACHE.get(key)
-            if cached and cached[0] == fp:
-                filt = cached[1]
-            else:
-                filt = CustomFilter(entry["config"])
-                RECEIVER_FILTER_CACHE[key] = (fp, filt)
-            out.append((key, filt))
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Found %d active receiver filters", len(out))
-        return out
-
-    async def get_thread_obj(tid: int) -> discord.Thread | None:
-        """Return cached discord.Thread or fetch & cache it."""
-        th = THREAD_CACHE.get(tid)
-        if th is not None:
-            return th
-        try:
-            ch = await discord_api_call_with_backoff(bot.fetch_channel, tid)
-        except (discord.NotFound, discord.Forbidden) as e:
-            THREAD_CACHE.pop(tid, None)
-            await _deactivate_dead_thread(tid, e, channel)
-            return None
-        except discord.HTTPException as e:
-            logger.warning(f"Failed to fetch channel {tid}: {e}")
-            return None
-        except Exception as e:
-            logger.warning(f"Unexpected error fetching channel {tid}: {e}")
-            return None
-        if isinstance(ch, discord.Thread):
-            THREAD_CACHE[tid] = ch
-            return ch
-        return None
-
-    # ------------------------------------------------------------------ #
-    # Consume the blocking EventStreams iterator in a thread-pool so the
-    # asyncio event-loop never stalls on network reads.  A bounded queue
-    # provides back-pressure if Discord throttles us.
-    # ------------------------------------------------------------------ #
+    # A bounded queue provides back-pressure if Discord throttles us.
     event_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=EventStreamConfig.QUEUE_MAX_SIZE)
 
-    def _producer():
-        """
-        Blocking producer: iterates EventStreams and enqueues messages.
-        Adds simple exponential backoff on errors and logs 403 bodies.
-
-        This runs in a daemon thread to avoid blocking the async event loop.
-        Updates global last_event_time on each successful event.
-        """
-        retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS
-        max_retry_backoff_seconds = RetryConfig.MAX_BACKOFF_SECS
-        stream: EventStreams | None = None
-        while True:
-            try:
-                if stream is None:
-                    stream = new_stream()
-                for evt in stream:
-                    global last_event_time
-                    retry_backoff_seconds = RetryConfig.INITIAL_BACKOFF_SECS  # reset on success
-
-                    # Update heartbeat timestamp
-                    with _last_event_lock:
-                        last_event_time = time.time()
-
-                    # Put event in queue with timeout to detect blocking
-                    if loop.is_closed():
-                        logger.info("Event loop closed; producer thread exiting")
-                        return
-                    try:
-                        future = asyncio.run_coroutine_threadsafe(
-                            asyncio.wait_for(event_queue.put(evt), timeout=EventStreamConfig.QUEUE_PUT_TIMEOUT_SECS),
-                            loop
-                        )
-                        future.result(timeout=EventStreamConfig.QUEUE_RESULT_TIMEOUT_SECS)
-                    except concurrent.futures.TimeoutError:
-                        logger.error(
-                            "Queue.put() timed out - queue may be blocked. "
-                            f"Queue size: {event_queue.qsize()}/{event_queue.maxsize}"
-                        )
-                        # This is a critical failure - the processing pipeline is stuck
-                        logger.error("Terminating process due to blocked queue")
-                        os.kill(os.getpid(), signal.SIGTERM)
-                        time.sleep(RetryConfig.GRACE_PERIOD_SECS)
-                        sys.exit(1)
-                    except Exception as e:
-                        if loop.is_closed():
-                            logger.info("Event loop closed; producer thread exiting")
-                            return
-                        logger.error(f"Failed to enqueue event: {e}")
-                # Iterator ended unexpectedly; reinit at the live tail.
-                # (No `since=` — see note on new_stream().)
-                logger.warning("EventStreams iterator ended; reinitializing")
-                stream = new_stream()
-            except requests.HTTPError as e:
-                status = getattr(e.response, "status_code", None)
-                body = None
-                try:
-                    if getattr(e, "response", None) is not None:
-                        body = e.response.text
-                except Exception:
-                    body = None
-                if status == 403:
-                    logger.error("EventStreams HTTP 403. Body:\n%s", (body or "(no body)")[:EventStreamConfig.ERROR_BODY_LIMIT])
-                else:
-                    logger.error("EventStreams HTTP error %s. Body:\n%s", status, (body or "(no body)")[:EventStreamConfig.ERROR_BODY_LIMIT])
-                logger.info("Retrying after %ds", retry_backoff_seconds)
-                time.sleep(retry_backoff_seconds)
-                if loop.is_closed():
-                    logger.info("Event loop closed; producer thread exiting")
-                    return
-                retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
-                # Reinitialize at the live tail. (No `since=` — see new_stream().)
-                try:
-                    stream = new_stream()
-                except Exception as e2:
-                    logger.exception("Reinit after HTTP error failed: %r", e2)
-                    # If we can't reinitialize, the stream is broken
-                    logger.error("Unable to reinitialize EventStream after HTTP error. Terminating.")
-                    os.kill(os.getpid(), signal.SIGTERM)
-                    time.sleep(RetryConfig.GRACE_PERIOD_SECS)
-                    sys.exit(1)
-            except Exception as e:
-                logger.exception("EventStreams error: %r; retrying in %ds", e, retry_backoff_seconds)
-                time.sleep(retry_backoff_seconds)
-                if loop.is_closed():
-                    logger.info("Event loop closed; producer thread exiting")
-                    return
-                retry_backoff_seconds = min(retry_backoff_seconds * 2, max_retry_backoff_seconds)
-                # If backoff has reached max, we're in a persistent failure state
-                if retry_backoff_seconds >= max_retry_backoff_seconds:
-                    logger.error(
-                        f"EventStream has been failing for extended period "
-                        f"(backoff reached {max_retry_backoff_seconds}s). Terminating process."
-                    )
-                    os.kill(os.getpid(), signal.SIGTERM)
-                    time.sleep(RetryConfig.GRACE_PERIOD_SECS)
-                    sys.exit(1)
-
-    # Use a daemon thread so the producer cannot keep the process alive
-    # after the event loop closes (e.g. during redeploys).
-    t = threading.Thread(target=_producer, daemon=True, name="eventstream-producer")
-    t.start()
+    threading.Thread(
+        target=producer_loop,
+        args=(loop, event_queue),
+        daemon=True,
+        name="eventstream-producer",
+    ).start()
 
     while True:
         change = await event_queue.get()
-
-        # Robust timestamp handling
-        ts = _event_ts_to_epoch(change)
-        if ts is None:
-            # If we cannot determine freshness, treat as *not stale* but log once.
-            # To avoid log spam, gate on an attribute.
-            if not getattr(stream_worker, "_warned_missing_ts", False):
-                logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
-                stream_worker._warned_missing_ts = True
-            stale = False
-        else:
-            current_time = datetime.now(UTC).timestamp()
-            stale = (current_time - ts) > STALENESS_SECS
-
-        # Some events may lack user (rare for rc, common for revision-create)
-        user = change.get("user")
-        if stale:
+        try:
+            await _process_event(change, channel)
+        finally:
             event_queue.task_done()
-            continue
-        if not user:
-            # Nothing sensible to route; skip quietly.
-            event_queue.task_done()
-            continue
-
-        # Determine routing targets: (thread_id, messageable, link_style) tuples.
-        # The thread_id is carried so a failed send can evict the cached thread
-        # object (see the send loop below).
-        targets: list[tuple[int, discord.abc.Messageable, str]] = []
-
-        # Custom threads and receivers
-        customs = await active_custom_filters()
-        receivers = await active_receiver_filters()
-
-        # Ultra-cheap global short-circuit across all filters, then per-target
-        # matching (both pure — see src/routing.py).
-        if fast_reject(change, [f for _, f in customs] + [f for _, f in receivers]):
-            event_queue.task_done()
-            continue  # fast reject before any regex-heavy work
-
-        for tid, style in match_filters(change, customs, "Custom filter error for"):
-            th = await get_thread_obj(tid)
-            if th is not None:
-                targets.append((tid, th, style))
-
-        receiver_targets = match_filters(change, receivers, "Receiver filter error for")
-
-        if not targets and not receiver_targets:
-            event_queue.task_done()
-            continue  # nothing to do
-
-        # Cache formatted messages by link_style to avoid re-formatting.
-        # (Default args bind the current event's values eagerly.)
-        msg_cache: dict[str, str] = {}
-
-        def _get_msg(style: str, _change: dict = change, _cache: dict[str, str] = msg_cache) -> str:
-            if style not in _cache:
-                _cache[style] = truncate_for_discord(format_change(_change, link_style=style))
-            return _cache[style]
-
-        # Send to thread targets with rate limit handling
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Sending change to %d thread(s) and %d receiver(s)",
-                len(targets),
-                len(receiver_targets),
-            )
-        for tid, tgt, style in targets:
-            sent = await send_message_with_backoff(tgt, _get_msg(style))
-            if sent is None:
-                # Send to a cached thread failed (deleted, access revoked, or a
-                # transient blip). Evict it so the next matching event misses the
-                # cache and re-runs get_thread_obj's classification: a successful
-                # refetch means it was transient (re-cached, no harm); a
-                # NotFound/Forbidden deactivates the thread and announces it.
-                # Without this, a thread that goes permanently unsendable while
-                # cached would drop every event silently — the same silent
-                # failure this change set is meant to eliminate.
-                THREAD_CACHE.pop(tid, None)
-
-        # Send to receiver webhooks (uses discord.py native webhook support)
-        for key, style in receiver_targets:
-            webhook_url = WEBHOOKS.get(key)
-            if not webhook_url:
-                logger.warning(f"Receiver '{key}' matched but no webhook URL")
-                continue
-            try:
-                await send_webhook_with_backoff(webhook_url, _get_msg(style), key)
-            except WebhookError as e:
-                # Permanent failure (404/403/401/bad URL): disable the receiver
-                # so it stops trying a webhook that cannot succeed, and announce
-                # it in the main channel so the silent death gets noticed.
-                logger.error(f"Webhook error for receiver '{key}': {e}")
-                await set_receiver_errored(key)
-                await _announce(channel, format_receiver_disabled_notice(key, str(e)))
-            except TransientWebhookError as e:
-                # Recoverable failure (5xx/network/timeout): drop this one event
-                # but keep the receiver active so a passing hiccup cannot silence
-                # it indefinitely. (Already logged at WARNING in the sender.)
-                logger.debug(f"Transient webhook failure for receiver '{key}': {e}")
-
-        event_queue.task_done()

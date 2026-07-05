@@ -13,9 +13,9 @@ from src.discord_utils import send_message_with_backoff
 from src.event_streams import (
     THREAD_CACHE,
     eventstream_health_monitor,
-    format_startup_notice,
     stream_worker,
 )
+from src.formatting import format_startup_notice
 from src.logging_setup import logger, setup_logging
 
 # --------------------------------------------------------------------------- #
