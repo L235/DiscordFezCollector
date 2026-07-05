@@ -7,7 +7,6 @@ from src.commands.helpers import (
     _EXCLUDE_KEY_MAP,
     _INCLUDE_KEY_MAP,
     FilterType,
-    _deepcopy_cfg,
     _parse_json_arg,
     mutate_filter,
 )
@@ -31,22 +30,6 @@ class TestParseJsonArg:
 
     def test_empty_string(self):
         assert _parse_json_arg("") == ""
-
-
-class TestDeepcopyConfig:
-    def test_deep_copies_dict(self):
-        original = {"a": [1, 2, 3]}
-        copy = _deepcopy_cfg(original)
-        copy["a"].append(4)
-        assert original["a"] == [1, 2, 3]
-
-    def test_non_json_values_are_still_copied(self):
-        # The old JSON-round-trip implementation silently returned
-        # non-serializable objects by identity; copy.deepcopy handles them.
-        original = {"a": {1, 2}}
-        result = _deepcopy_cfg(original)
-        assert result == original
-        assert result["a"] is not original["a"]
 
 
 class TestFilterTypeMaps:
@@ -107,6 +90,26 @@ class TestMutateFilter:
         ctx = AsyncMock()
         await mutate_filter(ctx, "threads", "999", FilterType.USER, "Alice", action="add_include")
         assert "Failed to update" in ctx.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    @patch("src.commands.helpers.mutate_entity_config_list")
+    async def test_add_invalid_regex_rejected(self, mock_mutate):
+        # A persisted bad regex would crash-loop the pipeline; /track must
+        # refuse it before it reaches the config.
+        ctx = AsyncMock()
+        await mutate_filter(ctx, "threads", "111", FilterType.PAGE, "(", action="add_include")
+        mock_mutate.assert_not_called()
+        assert "Invalid regex" in ctx.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    @patch("src.commands.helpers.mutate_entity_config_list")
+    async def test_remove_invalid_regex_still_allowed(self, mock_mutate):
+        # Removal must always work — it's the cleanup path for a bad pattern
+        # that reached the config via setraw.
+        mock_mutate.return_value = (True, [])
+        ctx = AsyncMock()
+        await mutate_filter(ctx, "threads", "111", FilterType.PAGE, "(", action="remove_include")
+        mock_mutate.assert_called_once_with("threads", "111", "pageIncludePatterns", remove=["("])
 
     @pytest.mark.asyncio
     @patch("src.commands.helpers.mutate_entity_config_list")

@@ -9,37 +9,8 @@ from datetime import UTC, datetime
 
 from src.constants import DISCORD_MESSAGE_LIMIT, TRUNCATED_MESSAGE_SUFFIX
 from src.event_streams import _event_ts_to_epoch
-from src.models import CustomFilter
 from src.routing import fast_reject, match_filters, truncate_for_discord
-
-
-def make_filter(**overrides) -> CustomFilter:
-    cfg = {
-        "siteName": "",
-        "pageIncludePatterns": [],
-        "pageExcludePatterns": [],
-        "userExcludeList": [],
-        "userIncludeList": [],
-        "summaryIncludePatterns": [],
-        "summaryExcludePatterns": [],
-        "linkStyle": "title",
-    }
-    cfg.update(overrides)
-    return CustomFilter(cfg)
-
-
-def make_change(**overrides) -> dict:
-    change = {
-        "type": "edit",
-        "user": "Alice",
-        "title": "Sandbox",
-        "comment": "test edit",
-        "server_name": "en.wikipedia.org",
-        "revision": {"new": 1},
-    }
-    change.update(overrides)
-    return change
-
+from tests.factories import make_change, make_filter
 
 # ── fast_reject ───────────────────────────────────────────────────────────── #
 
@@ -87,12 +58,12 @@ def test_match_filters_returns_key_and_link_style():
         (111, make_filter(userIncludeList=["Alice"], linkStyle="action")),
         (222, make_filter(userIncludeList=["Bob"])),
     ]
-    assert match_filters(make_change(), customs, "err") == [(111, "action")]
+    assert match_filters(make_change(), customs, "thread") == [(111, "action")]
 
 
 def test_match_filters_exclude_beats_include():
     filt = make_filter(userIncludeList=["Alice"], pageExcludePatterns=["Sandbox"])
-    assert match_filters(make_change(), [(1, filt)], "err") == []
+    assert match_filters(make_change(), [(1, filt)], "thread") == []
 
 
 def test_match_filters_broken_filter_skipped_others_still_match():
@@ -106,14 +77,14 @@ def test_match_filters_broken_filter_skipped_others_still_match():
         ("bad", ExplodingFilter()),
         ("good", make_filter(userIncludeList=["Alice"])),
     ]
-    assert match_filters(make_change(), keyed, "err") == [("good", "title")]
+    assert match_filters(make_change(), keyed, "thread") == [("good", "title")]
 
 
 def test_match_filters_site_name_restricts_server():
     filt = make_filter(userIncludeList=["Alice"], siteName="de.wikipedia.org")
-    assert match_filters(make_change(), [(1, filt)], "err") == []
+    assert match_filters(make_change(), [(1, filt)], "thread") == []
     assert match_filters(
-        make_change(server_name="de.wikipedia.org"), [(1, filt)], "err"
+        make_change(server_name="de.wikipedia.org"), [(1, filt)], "thread"
     ) == [(1, "title")]
 
 

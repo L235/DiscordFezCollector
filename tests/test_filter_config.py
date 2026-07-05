@@ -98,3 +98,48 @@ def test_require_list_key():
     assert require_list_key("pageIncludePatterns") is None
     assert require_list_key("linkStyle") is not None
     assert require_list_key("bogus") is not None
+
+
+def test_validate_rejects_invalid_regex():
+    # A persisted invalid regex crash-loops the pipeline; it must never
+    # get past the command boundary.
+    err, _ = validate_config_value("pageIncludePatterns", "(")
+    assert err is not None and "Invalid regex" in err
+    err, _ = validate_config_value("summaryIncludePatterns", ["ok", "*bad"])
+    assert err is not None and "Invalid regex" in err
+
+
+def test_validate_accepts_valid_regex_list():
+    err, val = validate_config_value("pageIncludePatterns", ["^WP:AN", "Sandbox$"])
+    assert err is None and val == ["^WP:AN", "Sandbox$"]
+
+
+def test_validate_rejects_null_and_bool_for_list_keys():
+    # `/config set userIncludeList null` must not silently track a user
+    # literally named "None" (and true must not become "True").
+    err, _ = validate_config_value("userIncludeList", None)
+    assert err is not None and "clear" in err
+    err, _ = validate_config_value("userIncludeList", True)
+    assert err is not None
+    err, _ = validate_config_value("userIncludeList", [None])
+    assert err is not None
+
+
+def test_validate_site_name_null_clears():
+    # JSON null was the historical idiom for clearing the site restriction.
+    err, val = validate_config_value("siteName", None)
+    assert err is None and val == ""
+
+
+def test_list_keys_derived_from_schema():
+    from src.models import FilterConfig
+
+    assert FilterConfig.LIST_KEYS == frozenset({
+        "pageIncludePatterns", "pageExcludePatterns",
+        "userIncludeList", "userExcludeList",
+        "summaryIncludePatterns", "summaryExcludePatterns",
+    })
+    assert FilterConfig.PATTERN_KEYS == frozenset({
+        "pageIncludePatterns", "pageExcludePatterns",
+        "summaryIncludePatterns", "summaryExcludePatterns",
+    })

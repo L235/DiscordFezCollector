@@ -42,8 +42,9 @@ staleness check → skip if no user → fast_reject() over all active filters
 ```
 
 Filters are rebuilt from config only when their config fingerprint changes
-(`FILTER_CACHE` / `RECEIVER_FILTER_CACHE`); formatted messages are cached per
-link style within one event.
+(the `THREAD_FILTERS` / `RECEIVER_FILTERS` `FilterRegistry` instances; a
+config that fails to compile is cached as skipped, never crashing the
+pipeline); formatted messages are cached per link style within one event.
 
 ## Persistence
 

@@ -1,4 +1,4 @@
-"""End-to-end tests for the event pipeline consumer (_process_event).
+"""End-to-end tests for the event pipeline consumer (process_event).
 
 These exercise the real routing path — config snapshot → filter compile/cache
 → fast-reject → match → dispatch — with only the Discord senders faked.
@@ -14,6 +14,7 @@ import src.config as config_mod
 import src.event_streams as es
 from src.config import CONFIG, WEBHOOKS
 from src.models import FilterConfig
+from tests.factories import make_change as base_change
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1/token"
 
@@ -69,16 +70,8 @@ def add_receiver(key: str, *, active=True, errored=False, with_webhook=True, **f
 
 
 def make_change(**overrides) -> dict:
-    change = {
-        "type": "edit",
-        "user": "Alice",
-        "title": "Sandbox",
-        "comment": "test edit",
-        "server_name": "en.wikipedia.org",
-        "revision": {"new": 1},
-        "timestamp": int(time.time()),
-    }
-    change.update(overrides)
+    change = base_change(**overrides)
+    change.setdefault("timestamp", int(time.time()))
     return change
 
 
@@ -88,7 +81,7 @@ async def test_matching_event_reaches_thread_and_receiver(pipeline_env):
     fake_thread = object()
     es.THREAD_CACHE[111] = fake_thread
 
-    await es._process_event(make_change(), FakeChannel())
+    await es.process_event(make_change(), FakeChannel())
 
     assert [t for t, _ in pipeline_env["messages"]] == [fake_thread]
     assert "**Alice** edited" in pipeline_env["messages"][0][1]
@@ -99,7 +92,7 @@ async def test_non_matching_event_sends_nothing(pipeline_env):
     add_thread(111, user_include_list=["Bob"])
     es.THREAD_CACHE[111] = object()
 
-    await es._process_event(make_change(), FakeChannel())
+    await es.process_event(make_change(), FakeChannel())
 
     assert pipeline_env["messages"] == []
     assert pipeline_env["webhooks"] == []
@@ -110,7 +103,7 @@ async def test_stale_event_dropped(pipeline_env):
     es.THREAD_CACHE[111] = object()
 
     stale_ts = int(time.time()) - (config_mod.STALENESS_SECS + 60)
-    await es._process_event(make_change(timestamp=stale_ts), FakeChannel())
+    await es.process_event(make_change(timestamp=stale_ts), FakeChannel())
 
     assert pipeline_env["messages"] == []
 
@@ -119,7 +112,7 @@ async def test_userless_event_dropped(pipeline_env):
     add_thread(111, user_include_list=["Alice"])
     es.THREAD_CACHE[111] = object()
 
-    await es._process_event(make_change(user=None), FakeChannel())
+    await es.process_event(make_change(user=None), FakeChannel())
 
     assert pipeline_env["messages"] == []
 
@@ -129,7 +122,7 @@ async def test_inactive_thread_and_errored_receiver_skipped(pipeline_env):
     add_receiver("dead", errored=True, user_include_list=["Alice"])
     es.THREAD_CACHE[111] = object()
 
-    await es._process_event(make_change(), FakeChannel())
+    await es.process_event(make_change(), FakeChannel())
 
     assert pipeline_env["messages"] == []
     assert pipeline_env["webhooks"] == []
@@ -144,7 +137,7 @@ async def test_failed_thread_send_evicts_cache(pipeline_env, monkeypatch):
 
     monkeypatch.setattr(es, "send_message_with_backoff", failing_send)
 
-    await es._process_event(make_change(), FakeChannel())
+    await es.process_event(make_change(), FakeChannel())
 
     assert 111 not in es.THREAD_CACHE  # next event re-fetches & re-classifies
 
@@ -159,7 +152,7 @@ async def test_permanent_webhook_failure_disables_receiver_and_announces(pipelin
 
     monkeypatch.setattr(es, "send_webhook_with_backoff", broken_webhook)
 
-    await es._process_event(make_change(), channel)
+    await es.process_event(make_change(), channel)
 
     entry = CONFIG["receivers"]["hook"]
     assert entry["errored"] is True
@@ -178,22 +171,37 @@ async def test_transient_webhook_failure_keeps_receiver_active(pipeline_env, mon
 
     monkeypatch.setattr(es, "send_webhook_with_backoff", flaky_webhook)
 
-    await es._process_event(make_change(), FakeChannel())
+    await es.process_event(make_change(), FakeChannel())
 
     entry = CONFIG["receivers"]["hook"]
     assert entry["errored"] is False
     assert entry["active"] is True
 
 
+async def test_invalid_persisted_regex_skips_target_not_pipeline(pipeline_env):
+    # A bad regex can reach the config via setraw (bypassing command
+    # validation). It must not crash the pipeline into a restart loop —
+    # the broken target is skipped, everything else keeps routing.
+    add_thread(111, user_include_list=["Alice"])
+    CONFIG["threads"]["111"]["config"]["pageIncludePatterns"] = ["("]
+    add_thread(222, user_include_list=["Alice"])
+    good_thread = object()
+    es.THREAD_CACHE[222] = good_thread
+
+    await es.process_event(make_change(), FakeChannel())  # must not raise
+
+    assert [t for t, _ in pipeline_env["messages"]] == [good_thread]
+
+
 async def test_filter_cache_rebuilds_on_config_change(pipeline_env):
     add_thread(111, user_include_list=["Alice"])
     es.THREAD_CACHE[111] = object()
 
-    await es._process_event(make_change(), FakeChannel())
+    await es.process_event(make_change(), FakeChannel())
     assert len(pipeline_env["messages"]) == 1
 
     # Change the filter config: Alice no longer matches.
     CONFIG["threads"]["111"]["config"] = FilterConfig(user_include_list=["Bob"]).to_dict()
 
-    await es._process_event(make_change(), FakeChannel())
+    await es.process_event(make_change(), FakeChannel())
     assert len(pipeline_env["messages"]) == 1  # unchanged — stale filter was rebuilt

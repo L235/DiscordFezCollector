@@ -14,15 +14,9 @@ from src.constants import (
     TRUNCATION_RESERVE,
 )
 from src.logging_setup import logger
-from src.models import CustomFilter
+from src.models import CustomFilter, event_comment
 
 K = TypeVar("K")  # target key: thread id (int) or receiver key (str)
-
-
-def event_comment(change: dict) -> str:
-    """The comment text used for summary matching (log events carry it in
-    log_action_comment)."""
-    return change.get("log_action_comment") or change.get("comment") or ""
 
 
 def fast_reject(change: dict, filters: list[CustomFilter]) -> bool:
@@ -50,12 +44,13 @@ def fast_reject(change: dict, filters: list[CustomFilter]) -> bool:
 def match_filters(
     change: dict,
     keyed_filters: list[tuple[K, CustomFilter]],
-    error_label: str,
+    target_kind: str,
 ) -> list[tuple[K, str]]:
     """Return (key, link_style) for every filter that matches the change.
 
-    A filter that raises is logged (with error_label naming the target kind)
-    and skipped; one broken filter must not block the others.
+    A filter that raises is logged (with target_kind naming what the key
+    identifies, e.g. "thread" or "receiver") and skipped; one broken filter
+    must not block the others.
     """
     matched: list[tuple[K, str]] = []
     for key, filt in keyed_filters:
@@ -63,7 +58,7 @@ def match_filters(
             if filt.matches(change):
                 matched.append((key, filt.link_style))
         except Exception as e:
-            logger.warning(f"{error_label} {key!r}: {e}")
+            logger.warning(f"Filter error for {target_kind} {key!r}: {e}")
     return matched
 
 

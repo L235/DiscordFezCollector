@@ -1,18 +1,29 @@
 """Domain models: the filter config schema and its compiled matcher."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from re import RegexFlag, compile, search
 from typing import Any, ClassVar
 
 
 def normalise_str_list(v: Any) -> list[str]:
-    """Coerce a user/JSON-supplied value into a list of strings."""
+    """Coerce a user/JSON-supplied value into a list of strings.
+
+    None means "no list" and becomes [] — it must never become ["None"].
+    """
+    if v is None:
+        return []
     if isinstance(v, str):
         return [v]
     if isinstance(v, list):
         return [str(x) for x in v]
     return [str(v)]
+
+
+def event_comment(change: dict) -> str:
+    """The comment text used for summary matching. Log events carry it in
+    log_action_comment; matching and fast-reject must use the same source."""
+    return change.get("log_action_comment") or change.get("comment") or ""
 
 
 @dataclass
@@ -48,10 +59,12 @@ class FilterConfig:
         "summaryExcludePatterns": "summary_exclude_patterns",
         "linkStyle": "link_style",
     }
-    #  The keys holding lists (everything except the two scalar keys)
-    LIST_KEYS: ClassVar[frozenset[str]] = frozenset(
-        k for k in JSON_KEYS if k not in ("siteName", "linkStyle")
-    )
+    #  Derived from the dataclass field types below (no hand-maintained copy
+    #  of which keys are lists): see the module-level assignments after the
+    #  class definition.
+    LIST_KEYS: ClassVar[frozenset[str]]
+    #  The list keys whose entries are regexes (validated at command boundary)
+    PATTERN_KEYS: ClassVar[frozenset[str]]
 
     @classmethod
     def from_dict(cls, cfg: dict) -> "FilterConfig":
@@ -60,12 +73,12 @@ class FilterConfig:
             if json_key not in cfg:
                 continue
             v = cfg[json_key]
-            if json_key == "siteName":
-                kwargs[attr] = str(v) if v else ""
+            if json_key in cls.LIST_KEYS:
+                kwargs[attr] = normalise_str_list(v)
             elif json_key == "linkStyle":
                 kwargs[attr] = v if v in cls.LINK_STYLES else "title"
-            else:
-                kwargs[attr] = normalise_str_list(v)
+            else:  # siteName
+                kwargs[attr] = str(v) if v else ""
         return cls(**kwargs)
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,6 +87,17 @@ class FilterConfig:
             v = getattr(self, attr)
             out[json_key] = list(v) if isinstance(v, list) else v
         return out
+
+
+# List-ness is a property of the field type, not a second hand-written set:
+# a new list field is automatically a valid /config add|remove|clear target.
+_LIST_ATTRS = {f.name for f in fields(FilterConfig) if f.default_factory is list}
+FilterConfig.LIST_KEYS = frozenset(
+    k for k, attr in FilterConfig.JSON_KEYS.items() if attr in _LIST_ATTRS
+)
+FilterConfig.PATTERN_KEYS = frozenset(
+    k for k in FilterConfig.LIST_KEYS if k.endswith("Patterns")
+)
 
 
 def _compile_pattern_list(patterns: list[str]) -> re.Pattern | None:
@@ -122,7 +146,7 @@ class CustomFilter:
         user = change["user"]
         # Some EventStreams variants may lack 'title'; guard.
         title = change.get("title", "")
-        comment = change.get("log_action_comment") or change.get("comment") or ""
+        comment = event_comment(change)
         server = change.get("server_name", "")
 
         if self.site_name and self.site_name.lower() != server.lower():

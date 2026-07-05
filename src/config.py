@@ -9,7 +9,7 @@ from typing import Any
 
 from src.constants import CONFIG_VERSION, JSON_INDENT, UTF8_ENCODING
 from src.logging_setup import logger
-from src.models import FilterConfig, normalise_str_list
+from src.models import FilterConfig
 
 # --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
@@ -181,8 +181,6 @@ async def set_custom_thread_active(thread_id: str, active: bool) -> bool:
         logger.info(f"Thread {thread_id} active state changed: {old_state} -> {active}")
         return True
 
-# Re-exported for the command layer; the definition lives with the schema.
-_normalise_list_val = normalise_str_list
 
 # --------------------------------------------------------------------------- #
 # ── Unified entity operations                                               #

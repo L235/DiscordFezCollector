@@ -1,3 +1,4 @@
+import copy
 import json
 
 import discord
@@ -6,7 +7,6 @@ from discord.ext import commands
 from src.bot_instance import bot
 from src.commands.helpers import (
     FilterType,
-    _deepcopy_cfg,
     _parse_json_arg,
     is_bot_owner,
     mutate_filter,
@@ -122,7 +122,7 @@ async def receiver_setconfig_cmd(ctx: commands.Context, key: str, config_key: st
     if err:
         await ctx.reply(err)
         return
-    cfg = _deepcopy_cfg(entry["config"])
+    cfg = copy.deepcopy(entry["config"])
     cfg[config_key] = parsed
     ok = await update_receiver_config(key, cfg)
     if ok:

@@ -1,3 +1,4 @@
+import copy
 import json
 
 from discord import Attachment
@@ -5,25 +6,26 @@ from discord.ext import commands
 
 from src.bot_instance import bot
 from src.commands.helpers import (
-    _deepcopy_cfg,
     _parse_json_arg,
     _require_custom_thread,
     authorised,
+    coerce_str_list,
     read_json_attachment,
     require_list_key,
     send_json_file,
     validate_config_value,
+    validate_patterns,
 )
 from src.config import (
     CONFIG,
     CONFIG_LOCK,
-    _normalise_list_val,
     mutate_custom_thread_config_list,
     save_config,
     update_custom_thread_config,
 )
 from src.constants import JSON_INDENT
 from src.logging_setup import logger
+from src.models import FilterConfig
 
 # ── /globalconfig ─────────────────────────────────────────────────────────── #
 
@@ -42,7 +44,7 @@ async def globalconfig_group(ctx: commands.Context):
 async def globalconfig_getraw_cmd(ctx: commands.Context):
     logger.info(f"Global config getraw command from {ctx.author}")
     async with CONFIG_LOCK:
-        snapshot = _deepcopy_cfg(CONFIG)
+        snapshot = copy.deepcopy(CONFIG)
     await send_json_file(ctx, snapshot, "global_config.json")
 
 
@@ -93,7 +95,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     if err:
         await ctx.reply(err)
         return
-    cfg = _deepcopy_cfg(entry["config"])
+    cfg = copy.deepcopy(entry["config"])
     cfg[key] = parsed
     ok = await update_custom_thread_config(str(ctx.channel.id), cfg)
     if ok:
@@ -103,8 +105,13 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
         await ctx.reply("Failed to set.")
 
 
+#  op → reply verb; op doubles as the mutate_custom_thread_config_list kwarg.
+_LIST_OPS = {"add": "Added to", "remove": "Removed from"}
+
+
 async def _mutate_thread_list(ctx: commands.Context, key: str, value: str, *, op: str) -> None:
     """Shared body of /config add|remove: validate, mutate, report."""
+    verb = _LIST_OPS[op]  # KeyError on an op typo — fail loudly, not as a remove
     entry = await _require_custom_thread(ctx)
     if not entry:
         return
@@ -112,11 +119,19 @@ async def _mutate_thread_list(ctx: commands.Context, key: str, value: str, *, op
     if err:
         await ctx.reply(err)
         return
-    vals = _normalise_list_val(_parse_json_arg(value))
-    kwargs = {"add": vals} if op == "add" else {"remove": vals}
-    ok, new_list = await mutate_custom_thread_config_list(str(ctx.channel.id), key, **kwargs)
+    err, vals = coerce_str_list(_parse_json_arg(value))
+    if err:
+        await ctx.reply(err)
+        return
+    # Regex validity is only enforced when adding: removal must always work,
+    # even for a bad pattern that reached the config via setraw.
+    if op == "add" and key in FilterConfig.PATTERN_KEYS:
+        err = validate_patterns(vals)
+        if err:
+            await ctx.reply(err)
+            return
+    ok, new_list = await mutate_custom_thread_config_list(str(ctx.channel.id), key, **{op: vals})
     if ok:
-        verb = "Added to" if op == "add" else "Removed from"
         await ctx.reply(f"{verb} `{key}`: `{vals}`\nNow: `{new_list}`")
     else:
         logger.error(f"Failed to {op} on config {key} for thread {ctx.channel.id}")

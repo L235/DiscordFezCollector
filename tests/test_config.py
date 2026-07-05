@@ -7,11 +7,11 @@ import pytest
 import src.config as config_mod
 from src.config import (
     CONFIG,
-    _normalise_list_val,
     load_config,
     parse_webhooks_env,
     save_config,
 )
+from src.models import normalise_str_list
 
 # ---------------------------------------------------------------------------
 # Fixture: isolate every test from the real state file / CONFIG dict
@@ -35,21 +35,26 @@ def isolate_config(tmp_path, monkeypatch):
 #  TestNormaliseListVal                                                  #
 # ===================================================================== #
 
-class TestNormaliseListVal:
+class TestNormaliseStrList:
     def test_string_becomes_single_element_list(self):
-        assert _normalise_list_val("hello") == ["hello"]
+        assert normalise_str_list("hello") == ["hello"]
 
     def test_list_passes_through(self):
-        assert _normalise_list_val(["a", "b"]) == ["a", "b"]
+        assert normalise_str_list(["a", "b"]) == ["a", "b"]
 
     def test_list_elements_coerced_to_str(self):
-        assert _normalise_list_val([1, 2, 3]) == ["1", "2", "3"]
+        assert normalise_str_list([1, 2, 3]) == ["1", "2", "3"]
 
     def test_non_list_non_string_wrapped(self):
-        assert _normalise_list_val(42) == ["42"]
+        assert normalise_str_list(42) == ["42"]
 
     def test_empty_list(self):
-        assert _normalise_list_val([]) == []
+        assert normalise_str_list([]) == []
+
+    def test_none_means_empty_not_the_string_none(self):
+        # Regression: null in a hand-edited config must clear the list, not
+        # silently track a wiki user literally named "None".
+        assert normalise_str_list(None) == []
 
 
 # ===================================================================== #

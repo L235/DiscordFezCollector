@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from typing import NoReturn, TypeVar
+from typing import NoReturn
 
 import discord
 import requests
@@ -90,8 +90,9 @@ def terminate_process(reason: str) -> NoReturn:
 
     Sends SIGTERM (which main()'s handler turns into a graceful exit), waits
     out a grace period, then force-exits if the process is somehow still
-    alive. The time.sleep is deliberate even on the event-loop path: the
-    process is dying, and the SIGTERM handler interrupts the sleep anyway.
+    alive. Blocking — for thread contexts (the producer); async callers must
+    use the inline os.kill + `await asyncio.sleep` sequence instead so the
+    event loop keeps draining during the grace period.
     """
     logger.error(f"Terminating process: {reason}")
     os.kill(os.getpid(), signal.SIGTERM)
@@ -103,7 +104,8 @@ def terminate_process(reason: str) -> NoReturn:
 # ── Caches & runtime state                                                   #
 # --------------------------------------------------------------------------- #
 
-K = TypeVar("K")  # filter-target key: thread id (int) or receiver key (str)
+#  Filter-target key: thread id (int) or receiver key (str)
+TargetKey = int | str
 
 
 def _fingerprint(cfg: dict) -> str:
@@ -116,21 +118,31 @@ class FilterRegistry:
 
     Compiling a CustomFilter means building regexes, so we fingerprint the
     raw config dict and reuse the compiled filter until the config differs.
+
+    A config that fails to compile (e.g. an invalid regex smuggled in via
+    setraw, bypassing command validation) is cached as None — logged once,
+    and the target is skipped until its config changes. It must never crash
+    the pipeline into a restart loop, because the bad config is persisted
+    and would crash every restart too.
     """
 
     def __init__(self) -> None:
-        self._cache: dict[K, tuple[str, CustomFilter]] = {}
+        self._cache: dict[TargetKey, tuple[str, CustomFilter | None]] = {}
 
-    def get(self, key: K, cfg: dict) -> CustomFilter:
+    def get(self, key: TargetKey, cfg: dict) -> CustomFilter | None:
         fp = _fingerprint(cfg)
         cached = self._cache.get(key)
         if cached and cached[0] == fp:
             return cached[1]
-        filt = CustomFilter(cfg)
+        try:
+            filt = CustomFilter(cfg)
+        except Exception as e:
+            logger.error(f"Invalid filter config for {key!r}; skipping this target until its config changes: {e}")
+            filt = None
         self._cache[key] = (fp, filt)
         return filt
 
-    def evict(self, key: K) -> None:
+    def evict(self, key: TargetKey) -> None:
         self._cache.pop(key, None)
 
     def clear(self) -> None:
@@ -149,6 +161,9 @@ last_event_time: float | None = None
 
 #  Warn only once about events that carry no usable timestamp
 _warned_missing_ts = False
+
+#  Warn only once per receiver that is active but missing from FEZ_WEBHOOKS
+_warned_webhookless_receivers: set[str] = set()
 
 
 def _event_ts_to_epoch(change: dict) -> float | None:
@@ -205,7 +220,9 @@ async def active_custom_filters() -> list[tuple[int, CustomFilter]]:
         if not entry.get("active", False):
             THREAD_FILTERS.evict(tid)
             continue
-        out.append((tid, THREAD_FILTERS.get(tid, entry["config"])))
+        filt = THREAD_FILTERS.get(tid, entry["config"])
+        if filt is not None:
+            out.append((tid, filt))
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("Found %d active custom filters", len(out))
@@ -224,9 +241,14 @@ async def active_receiver_filters() -> list[tuple[str, CustomFilter]]:
             RECEIVER_FILTERS.evict(key)
             continue
         if key not in WEBHOOKS:
-            logger.warning(f"Receiver '{key}' active but no webhook URL in env")
+            # Warn once per key, not once per firehose event.
+            if key not in _warned_webhookless_receivers:
+                _warned_webhookless_receivers.add(key)
+                logger.warning(f"Receiver '{key}' active but no webhook URL in env; further warnings suppressed")
             continue
-        out.append((key, RECEIVER_FILTERS.get(key, entry["config"])))
+        filt = RECEIVER_FILTERS.get(key, entry["config"])
+        if filt is not None:
+            out.append((key, filt))
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("Found %d active receiver filters", len(out))
@@ -317,13 +339,22 @@ async def eventstream_health_monitor(channel: discord.TextChannel | None = None)
         time_since_last_event = time.time() - snapshot
 
         if time_since_last_event > EventStreamConfig.TIMEOUT_SECS:
+            # Log at detection time, before the (possibly slow, retrying)
+            # Discord announce — the stall must reach the log even if Discord
+            # is degraded at the same moment.
+            logger.error(
+                f"EventStream TIMEOUT: No events received for {time_since_last_event:.0f}s "
+                f"(threshold: {EventStreamConfig.TIMEOUT_SECS}s). Terminating process for restart."
+            )
             # Announce before dying (best-effort; runs in the async loop so the
             # send can complete before SIGTERM tears the loop down).
             await _announce(channel, format_eventstream_timeout_notice(time_since_last_event))
-            terminate_process(
-                f"EventStream TIMEOUT: no events received for {time_since_last_event:.0f}s "
-                f"(threshold: {EventStreamConfig.TIMEOUT_SECS}s)"
-            )
+            # Async flavor of terminate_process: the grace period must not
+            # block the event loop, so in-flight sends can flush while
+            # SIGTERM teardown proceeds.
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(RetryConfig.GRACE_PERIOD_SECS)
+            sys.exit(1)  # Force exit if SIGTERM didn't work
 
 
 # --------------------------------------------------------------------------- #
@@ -479,8 +510,12 @@ async def _dispatch(
             logger.debug(f"Transient webhook failure for receiver '{key}': {e}")
 
 
-async def _process_event(change: dict, channel: discord.TextChannel | None) -> None:
-    """Route one event: staleness gate → pure matching → dispatch."""
+async def process_event(change: dict, channel: discord.TextChannel | None) -> None:
+    """Route one event: staleness gate → pure matching → dispatch.
+
+    Public: this is the consumer's per-event entry point and the seam the
+    pipeline tests drive.
+    """
     if _is_stale(change):
         return
     # Some events may lack user (rare for rc, common for revision-create);
@@ -498,12 +533,12 @@ async def _process_event(change: dict, channel: discord.TextChannel | None) -> N
     # The thread_id is carried so a failed send can evict the cached thread
     # object (see _dispatch).
     targets: list[tuple[int, discord.abc.Messageable, str]] = []
-    for tid, style in match_filters(change, customs, "Custom filter error for"):
+    for tid, style in match_filters(change, customs, "thread"):
         th = await get_thread_obj(tid, channel)
         if th is not None:
             targets.append((tid, th, style))
 
-    receiver_targets = match_filters(change, receivers, "Receiver filter error for")
+    receiver_targets = match_filters(change, receivers, "receiver")
 
     if targets or receiver_targets:
         await _dispatch(change, targets, receiver_targets, channel)
@@ -530,6 +565,11 @@ async def stream_worker(channel: discord.TextChannel):
     while True:
         change = await event_queue.get()
         try:
-            await _process_event(change, channel)
+            await process_event(change, channel)
+        except Exception:
+            # One malformed event must not kill the consumer — the producer
+            # would keep filling the queue until back-pressure suicides the
+            # whole process. Drop the event and keep routing.
+            logger.exception("Unhandled error processing event; event dropped")
         finally:
             event_queue.task_done()

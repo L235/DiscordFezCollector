@@ -1,6 +1,6 @@
-import copy
 import io
 import json
+import re
 from enum import Enum
 from typing import Any
 
@@ -10,12 +10,11 @@ from discord.ext import commands
 from src.config import (
     DISCORD_CHANNEL_ID,
     OWNER_ID,
-    _normalise_list_val,
     ensure_custom_thread_entry,
     mutate_entity_config_list,
 )
 from src.constants import JSON_INDENT, UTF8_ENCODING
-from src.models import FilterConfig
+from src.models import FilterConfig, normalise_str_list
 
 
 def authorised(ctx) -> bool:
@@ -47,10 +46,6 @@ def _parse_json_arg(s: str) -> Any:
         return s
 
 
-def _deepcopy_cfg(obj: Any) -> Any:
-    return copy.deepcopy(obj)
-
-
 async def send_json_file(ctx: commands.Context, data: Any, filename: str) -> None:
     """Reply with *data* pretty-printed as an attached JSON file."""
     payload = json.dumps(data, indent=JSON_INDENT).encode(UTF8_ENCODING)
@@ -80,6 +75,37 @@ async def read_json_attachment(
         return None
 
 
+def validate_patterns(patterns: list[str]) -> str | None:
+    """Error message if any pattern is not a valid regex; None when all
+    compile. A persisted invalid regex would crash-loop the pipeline (the
+    compiled filter is rebuilt on every restart), so it must be rejected at
+    the command boundary."""
+    for p in patterns:
+        try:
+            re.compile(p)
+        except re.error as e:
+            return f"Invalid regex `{p}`: {e}"
+    return None
+
+
+def coerce_str_list(value: Any) -> tuple[str | None, list[str] | None]:
+    """Coerce a user-supplied JSON value into a list of strings, rejecting
+    types that would silently stringify into nonsense (null → ["None"],
+    true → ["True"], nested objects → Python reprs)."""
+    if isinstance(value, str):
+        return None, [value]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return None, [str(value)]
+    if isinstance(value, list):
+        out: list[str] = []
+        for x in value:
+            if isinstance(x, bool) or not isinstance(x, (str, int, float)):
+                return f"Invalid list element `{x!r}` — entries must be strings.", None
+            out.append(str(x))
+        return None, out
+    return f"Expected a string or list of strings, got `{value!r}`.", None
+
+
 def validate_config_value(key: str, value: Any) -> tuple[str | None, Any]:
     """Validate a user-supplied `<key> = <value>` config assignment against the
     FilterConfig schema. Returns (error_message, normalized_value); error is
@@ -95,10 +121,22 @@ def validate_config_value(key: str, value: Any) -> tuple[str | None, Any]:
             return f"`linkStyle` must be one of: {styles}", None
         return None, value
     if key == "siteName":
+        if value is None:
+            return None, ""  # `/config set siteName null` clears the restriction
         if not isinstance(value, str):
             return "`siteName` must be a string.", None
         return None, value
-    return None, _normalise_list_val(value)
+    # list keys
+    if value is None:
+        return f"`{key}` expects values — use `/config clear {key}` to empty it.", None
+    err, vals = coerce_str_list(value)
+    if err:
+        return err, None
+    if key in FilterConfig.PATTERN_KEYS:
+        err = validate_patterns(vals)
+        if err:
+            return err, None
+    return None, vals
 
 
 def require_list_key(key: str) -> str | None:
@@ -165,7 +203,15 @@ async def mutate_filter(
     """
     key_map, kwarg = _ACTION_MAP[action]
     config_key = key_map[target]
-    vals = _normalise_list_val(value)
+    vals = normalise_str_list(value)
+
+    # An invalid regex added via /track or /ignore would be persisted and
+    # crash-loop the pipeline on the next event — same guard as /config set.
+    if kwarg == "add" and config_key in FilterConfig.PATTERN_KEYS:
+        err = validate_patterns(vals)
+        if err:
+            await ctx.reply(err)
+            return
 
     ok, new_list = await mutate_entity_config_list(
         entity_type, entity_id, config_key, **{kwarg: vals}
