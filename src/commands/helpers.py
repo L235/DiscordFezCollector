@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 from enum import Enum
 from typing import Any
@@ -13,6 +14,7 @@ from src.config import (
     ensure_custom_thread_entry,
     mutate_entity_config_list,
 )
+from src.constants import JSON_INDENT, UTF8_ENCODING
 from src.models import FilterConfig
 
 
@@ -47,6 +49,35 @@ def _parse_json_arg(s: str) -> Any:
 
 def _deepcopy_cfg(obj: Any) -> Any:
     return copy.deepcopy(obj)
+
+
+async def send_json_file(ctx: commands.Context, data: Any, filename: str) -> None:
+    """Reply with *data* pretty-printed as an attached JSON file."""
+    payload = json.dumps(data, indent=JSON_INDENT).encode(UTF8_ENCODING)
+    await ctx.reply(file=discord.File(io.BytesIO(payload), filename=filename),
+                    mention_author=False)
+
+
+async def read_json_attachment(
+    ctx: commands.Context, attachment: discord.Attachment | None, usage_hint: str
+) -> Any | None:
+    """Resolve and parse a JSON attachment for a setraw-style command.
+
+    Accepts either the explicit slash-command attachment or the first
+    attachment on the invoking message. Replies with the problem and returns
+    None when there is no attachment or it isn't valid JSON.
+    """
+    if attachment is None:
+        if ctx.message is None or not ctx.message.attachments:
+            await ctx.reply(f"Attach a **JSON** file to `{usage_hint}`.", mention_author=False)
+            return None
+        attachment = ctx.message.attachments[0]
+    try:
+        raw = await attachment.read()
+        return json.loads(raw)
+    except Exception as e:
+        await ctx.reply(f"Could not parse attachment as JSON: {e}", mention_author=False)
+        return None
 
 
 def validate_config_value(key: str, value: Any) -> tuple[str | None, Any]:
