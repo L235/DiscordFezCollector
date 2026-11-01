@@ -14,13 +14,12 @@ from src.config import (
     delete_receiver,
     set_receiver_active,
     get_receiver_entry,
-    update_receiver_config,
+    set_entity_config_field,
 )
 from src.commands.helpers import (
     is_bot_owner,
     FilterType,
     _parse_json_arg,
-    _deepcopy_cfg,
     mutate_filter,
 )
 
@@ -118,9 +117,7 @@ async def receiver_setconfig_cmd(ctx: commands.Context, key: str, config_key: st
         await ctx.reply(f"Receiver `{key}` not found.")
         return
     parsed = _parse_json_arg(value)
-    cfg = _deepcopy_cfg(entry["config"])
-    cfg[config_key] = parsed
-    ok = await update_receiver_config(key, cfg)
+    ok = await set_entity_config_field("receivers", key, config_key, parsed)
     if ok:
         await ctx.reply(f"Set `{config_key}` for receiver `{key}`: `{parsed}`")
     else:

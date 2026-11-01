@@ -149,15 +149,17 @@ def save_config(cfg: dict) -> bool:
 
 CONFIG: Dict[str, Any] = load_config()
 CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
+_CONFIG_DIRTY = False  # An unconfirmed save requires a later write, even for a no-op.
 
 
 @asynccontextmanager
 async def _config_edit(*, best_effort=False):
     """Serialize edits and publish only confirmed saves; keep network I/O off-loop."""
+    global _CONFIG_DIRTY
     async with CONFIG_LOCK:
         proposed = deepcopy(CONFIG)
         yield proposed
-        if proposed == CONFIG:
+        if proposed == CONFIG and not _CONFIG_DIRTY:
             return
         pending = asyncio.create_task(asyncio.to_thread(save_config, proposed))
         cancelled = False
@@ -172,6 +174,7 @@ async def _config_edit(*, best_effort=False):
                 # A thread cannot be cancelled. Keep the lock through repeated
                 # cancellation so an older save cannot overwrite a later edit.
                 cancelled = True
+        _CONFIG_DIRTY = not saved
         if not saved and best_effort:
             logger.warning("Automatic disable applied only in memory; persistence failed")
         if saved or best_effort:
@@ -247,6 +250,16 @@ async def update_entity_config(entity_type: str, entity_id: str, new_cfg: dict) 
             return False
         entity["config"] = new_cfg
         logger.info(f"Updated config for {entity_type} entry {entity_id}")
+        return True
+
+
+async def set_entity_config_field(entity_type: str, entity_id: str, field: str, value: Any) -> bool:
+    """Change one field against the latest configuration while holding the edit lock."""
+    async with _config_edit() as proposed:
+        entity = proposed.get(entity_type, {}).get(entity_id)
+        if not entity:
+            return False
+        entity["config"][field] = deepcopy(value)
         return True
 
 

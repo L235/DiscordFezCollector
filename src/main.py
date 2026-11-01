@@ -30,7 +30,10 @@ async def on_error(event, *args, **kwargs):
 @bot.event
 async def on_command_error(ctx, error):
     """Log command errors."""
-    cause = getattr(error, "original", error)
+    cause = error
+    while isinstance(cause, (commands.CommandInvokeError, commands.HybridCommandError,
+                             discord.app_commands.CommandInvokeError)):
+        cause = cause.original
     if isinstance(cause, ConfigPersistenceError):
         logger.error("Configuration persistence failed during command")
         await ctx.reply("Could not confirm the configuration was saved. Please retry.", mention_author=False)

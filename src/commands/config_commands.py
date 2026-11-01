@@ -12,6 +12,7 @@ from src.config import (
     CONFIG_LOCK,
     replace_config,
     update_custom_thread_config,
+    set_entity_config_field,
     mutate_custom_thread_config_list,
     _normalise_list_val,
 )
@@ -19,7 +20,6 @@ from src.commands.helpers import (
     authorised,
     _require_custom_thread,
     _parse_json_arg,
-    _deepcopy_cfg,
 )
 
 
@@ -94,9 +94,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     if not entry:
         return
     parsed = _parse_json_arg(value)
-    cfg = _deepcopy_cfg(entry["config"])
-    cfg[key] = parsed
-    ok = await update_custom_thread_config(str(ctx.channel.id), cfg)
+    ok = await set_entity_config_field("threads", str(ctx.channel.id), key, parsed)
     if ok:
         await ctx.reply(f"Set `{key}`: `{parsed}`")
     else:

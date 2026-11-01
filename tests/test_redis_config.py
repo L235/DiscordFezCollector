@@ -60,6 +60,7 @@ def redis_store(monkeypatch, tmp_path):
     session.mount("https://test.upstash.io", remote)
     store = UpstashConfigStore("https://test.upstash.io", "test-token", "fez:test:config", session=session)
     monkeypatch.setattr(config, "REDIS_STORE", store)
+    monkeypatch.setattr(config, "_CONFIG_DIRTY", False)
     monkeypatch.setattr(config, "CONFIG_LOCK", asyncio.Lock())
     monkeypatch.setattr(config, "STATE_FILE", tmp_path / "must-not-exist" / "config.json")
     original = copy.deepcopy(config.CONFIG)

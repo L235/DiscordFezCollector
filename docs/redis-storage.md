@@ -30,7 +30,11 @@ write without confirming it; the command reports failure and the operator can
 retry the intended setting. No successful save is acknowledged before Redis
 confirms it. Automatic disabling of a broken destination still applies in memory
 if storage fails, to keep the stream running; a warning records that limitation,
-and a later successful edit saves the current configuration.
+and a later successful edit saves the current configuration. Unconfirmed saves
+remain marked dirty, so repeating an unchanged setting retries persistence.
+Single-field edits apply to the latest state inside the edit lock. Slash commands
+are deferred before their callbacks wait on locks or I/O, and both text and slash
+commands report storage failures after unwrapping Discord's invocation errors.
 
 ## Migration
 
