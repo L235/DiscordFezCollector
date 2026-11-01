@@ -204,7 +204,7 @@ async def _deactivate_dead_thread(
         if isinstance(exc, discord.NotFound)
         else "access forbidden"
     )
-    if await set_custom_thread_active(str(tid), False):
+    if await set_custom_thread_active(str(tid), False, best_effort=True):
         logger.error(f"Custom thread {tid} permanently unsendable ({reason}); deactivated")
         await _announce(channel, format_thread_disabled_notice(tid, reason))
 

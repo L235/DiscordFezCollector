@@ -10,8 +10,9 @@ from src.constants import JSON_INDENT, UTF8_ENCODING
 from src.config import (
     CONFIG,
     CONFIG_LOCK,
-    save_config,
+    replace_config,
     update_custom_thread_config,
+    set_entity_config_field,
     mutate_custom_thread_config_list,
     _normalise_list_val,
 )
@@ -19,7 +20,6 @@ from src.commands.helpers import (
     authorised,
     _require_custom_thread,
     _parse_json_arg,
-    _deepcopy_cfg,
 )
 
 
@@ -61,10 +61,7 @@ async def globalconfig_setraw_cmd(ctx: commands.Context, attachment: discord.Att
     except Exception as e:
         await ctx.reply(f"Could not parse attachment as JSON: {e}", mention_author=False)
         return
-    async with CONFIG_LOCK:
-        CONFIG.clear()
-        CONFIG.update(new_cfg)
-        save_config(CONFIG)
+    await replace_config(new_cfg)
     await ctx.reply("Global configuration **replaced**.", mention_author=False)
 
 
@@ -97,9 +94,7 @@ async def config_set_cmd(ctx: commands.Context, key: str, *, value: str):
     if not entry:
         return
     parsed = _parse_json_arg(value)
-    cfg = _deepcopy_cfg(entry["config"])
-    cfg[key] = parsed
-    ok = await update_custom_thread_config(str(ctx.channel.id), cfg)
+    ok = await set_entity_config_field("threads", str(ctx.channel.id), key, parsed)
     if ok:
         await ctx.reply(f"Set `{key}`: `{parsed}`")
     else:

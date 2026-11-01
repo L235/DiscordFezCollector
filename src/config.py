@@ -1,4 +1,6 @@
 import asyncio
+from contextlib import asynccontextmanager
+from copy import deepcopy
 import json
 import logging
 import os
@@ -9,6 +11,7 @@ from typing import Any, Dict, Optional, Tuple, List
 
 from src.constants import UTF8_ENCODING, JSON_INDENT, CONFIG_VERSION
 from src.logging_setup import logger
+from src.persistence import ConfigPersistenceError, store_from_env, validate_config
 
 # --------------------------------------------------------------------------- #
 # ── Environment / runtime configuration                                      #
@@ -87,17 +90,24 @@ DEFAULT_CUSTOM_CONFIG: Dict[str, Any] = {
 
 # Config schema (see docstring):
 DEFAULT_CONFIG: Dict[str, Any] = {"version": CONFIG_VERSION, "threads": {}, "receivers": {}}
+REDIS_STORE = store_from_env()
 
 
 def load_config() -> dict:
-    if not STATE_FILE.exists():
-        logger.info(f"Creating new config file at {STATE_FILE}")
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        save_config(DEFAULT_CONFIG)
-        return json.loads(json.dumps(DEFAULT_CONFIG))
-    logger.debug(f"Loading config from {STATE_FILE}")
-    with STATE_FILE.open(encoding=UTF8_ENCODING) as fp:
-        raw = json.load(fp)
+    if REDIS_STORE is not None:
+        raw = REDIS_STORE.load()
+        logger.info("Loaded configuration from Redis")
+    else:
+        if not STATE_FILE.exists():
+            logger.info(f"Creating new config file at {STATE_FILE}")
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            if not save_config(DEFAULT_CONFIG):
+                raise ConfigPersistenceError("Could not initialize configuration storage.")
+            return deepcopy(DEFAULT_CONFIG)
+        logger.debug(f"Loading config from {STATE_FILE}")
+        with STATE_FILE.open(encoding=UTF8_ENCODING) as fp:
+            raw = json.load(fp)
+    validate_config(raw)
     # ensure keys exist - older configs will silently keep working,
     # but we no longer mutate them in-place.
     raw.setdefault("threads", {})
@@ -117,25 +127,70 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> bool:
     """Atomically persist the config. Returns True on success, False on failure.
 
-    A write failure (read-only / full volume, permissions) is logged at ERROR
-    and swallowed rather than propagated — a persistence problem must not crash
-    the EventStreams worker or a command handler. The in-memory CONFIG remains
-    authoritative until the process restarts.
+    Failure is logged without credentials and returned to the caller. Runtime
+    User edits publish their new in-memory state only after this succeeds.
+    Automatic safety disables may apply in memory even during an outage.
     """
-    tmp = STATE_FILE.with_suffix(".tmp")
     try:
-        with tmp.open("w", encoding=UTF8_ENCODING) as fp:
-            json.dump(cfg, fp, indent=JSON_INDENT, sort_keys=True)
-        tmp.replace(STATE_FILE)
+        validate_config(cfg)
+        if REDIS_STORE is not None:
+            REDIS_STORE.save(cfg)
+        else:
+            tmp = STATE_FILE.with_suffix(".tmp")
+            with tmp.open("w", encoding=UTF8_ENCODING) as fp:
+                json.dump(cfg, fp, indent=JSON_INDENT, sort_keys=True)
+            tmp.replace(STATE_FILE)
     except Exception as e:
-        logger.error(f"Failed to persist config to {STATE_FILE}: {e}")
+        logger.error("Failed to persist configuration (%s)", type(e).__name__)
         return False
-    logger.debug(f"Config saved to {STATE_FILE}")
+    logger.debug("Configuration saved")
     return True
 
 
 CONFIG: Dict[str, Any] = load_config()
 CONFIG_LOCK = asyncio.Lock()  # to prevent simultaneous writes
+_CONFIG_DIRTY = False  # An unconfirmed save requires a later write, even for a no-op.
+
+
+@asynccontextmanager
+async def _config_edit(*, best_effort=False):
+    """Serialize edits and publish only confirmed saves; keep network I/O off-loop."""
+    global _CONFIG_DIRTY
+    async with CONFIG_LOCK:
+        proposed = deepcopy(CONFIG)
+        yield proposed
+        if proposed == CONFIG and not _CONFIG_DIRTY:
+            return
+        pending = asyncio.create_task(asyncio.to_thread(save_config, proposed))
+        cancelled = False
+        while True:
+            try:
+                saved = await asyncio.shield(pending)
+                break
+            except asyncio.CancelledError:
+                if pending.cancelled():
+                    # Loop shutdown cancels all tasks, including the worker.
+                    raise
+                # A thread cannot be cancelled. Keep the lock through repeated
+                # cancellation so an older save cannot overwrite a later edit.
+                cancelled = True
+        _CONFIG_DIRTY = not saved
+        if not saved and best_effort:
+            logger.warning("Automatic disable applied only in memory; persistence failed")
+        if saved or best_effort:
+            CONFIG.clear()
+            CONFIG.update(proposed)
+        if cancelled:
+            raise asyncio.CancelledError
+        if not saved and not best_effort:
+            raise ConfigPersistenceError("Could not confirm the configuration was saved. Please retry.")
+
+
+async def replace_config(value: dict) -> None:
+    validate_config(value)
+    async with _config_edit() as proposed:
+        proposed.clear()
+        proposed.update(deepcopy(value))
 
 # --------------------------------------------------------------------------- #
 # ── Helper functions for config mutation                                     #
@@ -146,8 +201,8 @@ def _blank_custom_cfg() -> dict:
 
 async def ensure_custom_thread_entry(thread_id: str, thread_name: str, *, create_if_missing: bool = False) -> Optional[dict]:
     """Return the CONFIG entry for *thread_id*, optionally creating it."""
-    async with CONFIG_LOCK:
-        entry = CONFIG["threads"].get(thread_id)
+    async with _config_edit() as proposed:
+        entry = proposed["threads"].get(thread_id)
         if entry is None and create_if_missing:
             logger.info(f"Creating new config entry for thread {thread_name} ({thread_id})")
             entry = {
@@ -155,19 +210,17 @@ async def ensure_custom_thread_entry(thread_id: str, thread_name: str, *, create
                 "active": True,
                 "config": _blank_custom_cfg(),
             }
-            CONFIG["threads"][thread_id] = entry
-            save_config(CONFIG)
+            proposed["threads"][thread_id] = entry
         return entry
 
-async def set_custom_thread_active(thread_id: str, active: bool) -> bool:
-    async with CONFIG_LOCK:
-        entry = CONFIG["threads"].get(thread_id)
+async def set_custom_thread_active(thread_id: str, active: bool, *, best_effort: bool = False) -> bool:
+    async with _config_edit(best_effort=best_effort) as proposed:
+        entry = proposed["threads"].get(thread_id)
         if not entry:
             logger.warning(f"Attempted to set active state for unknown thread {thread_id}")
             return False
         old_state = entry.get("active", False)
         entry["active"] = active
-        save_config(CONFIG)
         logger.info(f"Thread {thread_id} active state changed: {old_state} -> {active}")
         return True
 
@@ -190,14 +243,23 @@ async def get_entity_entry(entity_type: str, entity_id: str) -> Optional[dict]:
 
 async def update_entity_config(entity_type: str, entity_id: str, new_cfg: dict) -> bool:
     """Replace an entity's config dict. Works for both threads and receivers."""
-    async with CONFIG_LOCK:
-        entity = CONFIG.get(entity_type, {}).get(entity_id)
+    async with _config_edit() as proposed:
+        entity = proposed.get(entity_type, {}).get(entity_id)
         if not entity:
             logger.warning(f"Attempted to update config for unknown {entity_type} entry {entity_id}")
             return False
         entity["config"] = new_cfg
-        save_config(CONFIG)
         logger.info(f"Updated config for {entity_type} entry {entity_id}")
+        return True
+
+
+async def set_entity_config_field(entity_type: str, entity_id: str, field: str, value: Any) -> bool:
+    """Change one field against the latest configuration while holding the edit lock."""
+    async with _config_edit() as proposed:
+        entity = proposed.get(entity_type, {}).get(entity_id)
+        if not entity:
+            return False
+        entity["config"][field] = deepcopy(value)
         return True
 
 
@@ -208,8 +270,8 @@ async def mutate_entity_config_list(
     clear: bool = False
 ) -> Tuple[bool, Optional[List[str]]]:
     """Mutate a list field in any entity's config. Works for both threads and receivers."""
-    async with CONFIG_LOCK:
-        entity = CONFIG.get(entity_type, {}).get(entity_id)
+    async with _config_edit() as proposed:
+        entity = proposed.get(entity_type, {}).get(entity_id)
         if not entity:
             logger.warning(f"Attempted to mutate config for unknown {entity_type} entry {entity_id}")
             return False, None
@@ -230,7 +292,6 @@ async def mutate_entity_config_list(
                 logger.info(f"Removing {remove} from {field} for {entity_type} entry {entity_id}")
                 lst = [it for it in lst if it not in remove]
             cfg[field] = lst
-        save_config(CONFIG)
         return True, list(cfg[field])
 
 
@@ -263,27 +324,25 @@ async def create_receiver(key: str, name: str) -> Tuple[bool, str]:
     if key not in WEBHOOKS:
         return False, f"No webhook URL found for key '{key}' in FEZ_WEBHOOKS env var"
 
-    async with CONFIG_LOCK:
-        if key in CONFIG.get("receivers", {}):
+    async with _config_edit() as proposed:
+        if key in proposed.get("receivers", {}):
             return False, f"Receiver '{key}' already exists"
-        CONFIG.setdefault("receivers", {})[key] = {
+        proposed.setdefault("receivers", {})[key] = {
             "name": name,
             "active": False,  # Start inactive until explicitly activated
             "errored": False,
             "config": _blank_custom_cfg(),
         }
-        save_config(CONFIG)
         logger.info(f"Created receiver '{key}' with name '{name}'")
     return True, f"Created receiver '{key}'"
 
 async def delete_receiver(key: str) -> Tuple[bool, str]:
     """Delete a receiver entry."""
-    async with CONFIG_LOCK:
-        receivers = CONFIG.get("receivers", {})
+    async with _config_edit() as proposed:
+        receivers = proposed.get("receivers", {})
         if key not in receivers:
             return False, f"Receiver '{key}' not found"
         del receivers[key]
-        save_config(CONFIG)
         logger.info(f"Deleted receiver '{key}'")
     return True, f"Deleted receiver '{key}'"
 
@@ -292,8 +351,8 @@ async def set_receiver_active(key: str, active: bool) -> Tuple[bool, str]:
     if active and key not in WEBHOOKS:
         return False, f"Cannot activate: no webhook URL for '{key}' in FEZ_WEBHOOKS"
 
-    async with CONFIG_LOCK:
-        receivers = CONFIG.get("receivers", {})
+    async with _config_edit() as proposed:
+        receivers = proposed.get("receivers", {})
         if key not in receivers:
             return False, f"Receiver '{key}' not found"
         entry = receivers[key]
@@ -302,20 +361,18 @@ async def set_receiver_active(key: str, active: bool) -> Tuple[bool, str]:
             entry["errored"] = False
             logger.info(f"Cleared error state for receiver '{key}'")
         entry["active"] = active
-        save_config(CONFIG)
         logger.info(f"Receiver '{key}' {'activated' if active else 'deactivated'}")
     state = "activated" if active else "deactivated"
     return True, f"Receiver '{key}' {state}"
 
 async def set_receiver_errored(key: str) -> bool:
-    """Mark a receiver as errored (called when webhook fails)."""
-    async with CONFIG_LOCK:
-        receivers = CONFIG.get("receivers", {})
+    """Disable a broken webhook even if persistence is temporarily unavailable."""
+    async with _config_edit(best_effort=True) as proposed:
+        receivers = proposed.get("receivers", {})
         if key not in receivers:
             return False
         receivers[key]["errored"] = True
         receivers[key]["active"] = False  # Auto-deactivate on error
-        save_config(CONFIG)
         logger.warning(f"Receiver '{key}' marked as errored and deactivated")
     return True
 
