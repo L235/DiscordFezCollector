@@ -131,8 +131,15 @@ async def test_stream_worker_keeps_other_receivers_running_after_failure(tmp_pat
     # The only mocked input is the external blocking Wikimedia reader.
     queue_type = asyncio.Queue
     incoming = queue_type()
-    monkeypatch.setattr(streams.asyncio, 'Queue', lambda maxsize=0: incoming if maxsize == streams.EventStreamConfig.QUEUE_MAX_SIZE else queue_type(maxsize))
-    monkeypatch.setattr(streams.threading, 'Thread', lambda **kwargs: SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(streams, 'asyncio', SimpleNamespace(**dict(vars(asyncio), Queue=lambda maxsize=0: incoming if maxsize == streams.EventStreamConfig.QUEUE_MAX_SIZE else queue_type(maxsize))))
+    monkeypatch.setattr(streams, 'threading', SimpleNamespace(Thread=lambda **kwargs: SimpleNamespace(start=lambda: None)))
+    from src.delivery import DestinationDispatcher
+    dispatchers = []
+    def track_dispatcher(*args, **kwargs):
+        dispatcher = DestinationDispatcher(*args, **kwargs)
+        dispatchers.append(dispatcher)
+        return dispatcher
+    monkeypatch.setattr(streams, 'DestinationDispatcher', track_dispatcher)
     delivered, attempts = [], []
     done = asyncio.Event()
     async def send(url, content, key):
@@ -151,6 +158,7 @@ async def test_stream_worker_keeps_other_receivers_running_after_failure(tmp_pat
     worker = asyncio.create_task(streams.stream_worker(None))
     try:
         await asyncio.wait_for(done.wait(), 1)
+        await asyncio.wait_for(asyncio.gather(*(w.queue.join() for w in list(dispatchers[0].workers.values()))), 1)
         assert delivered.count('healthy') == 2
         if permanent:
             assert attempts.count('failing') == 1

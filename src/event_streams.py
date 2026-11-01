@@ -26,7 +26,6 @@ from src.delivery import DestinationDispatcher
 from src.routing import RoutingPlanCache
 from src.config import (
     CONFIG,
-    CONFIG_LOCK,
     WEBHOOKS,
     USER_AGENT,
     STALENESS_SECS,
@@ -73,8 +72,9 @@ _last_event_lock = threading.Lock()
 last_event_time: Optional[float] = None
 
 async def get_routing_plan():
-    async with CONFIG_LOCK:
-        return ROUTING_CACHE.get(CONFIG, WEBHOOKS, config_state.CONFIG_REVISION)
+    # _config_edit publishes state and revision synchronously on this loop.
+    # Do not acquire its edit lock: it spans potentially slow storage I/O.
+    return ROUTING_CACHE.get(CONFIG, WEBHOOKS, config_state.CONFIG_REVISION)
 
 
 def _event_ts_to_epoch(change: dict) -> Optional[float]:
@@ -204,7 +204,7 @@ async def _deactivate_dead_thread(
         if isinstance(exc, discord.NotFound)
         else "access forbidden"
     )
-    if await set_custom_thread_active(str(tid), False):
+    if await set_custom_thread_active(str(tid), False, best_effort=True):
         logger.error(f"Custom thread {tid} permanently unsendable ({reason}); deactivated")
         await _announce(channel, format_thread_disabled_notice(tid, reason))
 
@@ -282,11 +282,11 @@ async def stream_worker(channel: discord.TextChannel):
 
     async def deliver(destination, message):
         kind, key = destination
-        async with CONFIG_LOCK:
-            entity_type = "threads" if kind == "thread" else "receivers"
-            entry = CONFIG.get(entity_type, {}).get(str(key))
-            if not entry or not entry.get("active", False) or entry.get("errored", False):
-                return
+        # This synchronous read sees only the last atomically published state.
+        entity_type = "threads" if kind == "thread" else "receivers"
+        entry = CONFIG.get(entity_type, {}).get(str(key))
+        if not entry or not entry.get("active", False) or entry.get("errored", False):
+            return
         if kind == "thread":
             target = await get_thread_obj(key)
             if target is not None:

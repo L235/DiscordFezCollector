@@ -65,7 +65,7 @@ def test_cached_plan_is_not_recompiled_between_configuration_edits():
 
 
 @pytest.mark.asyncio
-async def test_live_plan_refreshes_after_list_edit_and_failed_disk_write(tmp_path, monkeypatch):
+async def test_live_plan_refreshes_after_confirmed_edit_and_best_effort_disable(tmp_path, monkeypatch):
     import src.config as config
     import src.event_streams as streams
     from src.routing import RoutingPlanCache
@@ -74,11 +74,12 @@ async def test_live_plan_refreshes_after_list_edit_and_failed_disk_write(tmp_pat
     monkeypatch.setattr(streams, 'CONFIG', cfg)
     monkeypatch.setattr(streams, 'WEBHOOKS', {})
     monkeypatch.setattr(streams, 'ROUTING_CACHE', RoutingPlanCache())
-    monkeypatch.setattr(config, 'STATE_FILE', tmp_path / 'missing-directory' / 'config.json')
+    monkeypatch.setattr(config, 'STATE_FILE', tmp_path / 'config.json')
     assert (await streams.get_routing_plan()).route(event(user='Bob', title='Other')) == []
     await config.mutate_custom_thread_config_list('101', 'userIncludeList', add=['Bob'])
     assert (await streams.get_routing_plan()).route(event(user='Bob', title='Other')) == [('thread', 101, 'action')]
-    await config.set_custom_thread_active('101', False)
+    monkeypatch.setattr(config, 'STATE_FILE', tmp_path / 'missing-directory' / 'config.json')
+    await config.set_custom_thread_active('101', False, best_effort=True)
     assert (await streams.get_routing_plan()).route(event(user='Bob', title='Other')) == []
 
 
@@ -94,7 +95,5 @@ async def test_live_plan_refreshes_after_raw_configuration_replacement(tmp_path,
     monkeypatch.setattr(streams, 'ROUTING_CACHE', RoutingPlanCache())
     monkeypatch.setattr(config, 'STATE_FILE', tmp_path / 'config.json')
     assert (await streams.get_routing_plan()).route(event(title='Other')) == [('thread', 101, 'action')]
-    cfg.clear()
-    cfg.update({'threads': {}, 'receivers': {}})
-    config.save_config(cfg)
+    await config.replace_config({'threads': {}, 'receivers': {}})
     assert (await streams.get_routing_plan()).route(event()) == []
