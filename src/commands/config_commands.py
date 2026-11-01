@@ -10,7 +10,7 @@ from src.constants import JSON_INDENT, UTF8_ENCODING
 from src.config import (
     CONFIG,
     CONFIG_LOCK,
-    save_config,
+    replace_config,
     update_custom_thread_config,
     mutate_custom_thread_config_list,
     _normalise_list_val,
@@ -61,10 +61,7 @@ async def globalconfig_setraw_cmd(ctx: commands.Context, attachment: discord.Att
     except Exception as e:
         await ctx.reply(f"Could not parse attachment as JSON: {e}", mention_author=False)
         return
-    async with CONFIG_LOCK:
-        CONFIG.clear()
-        CONFIG.update(new_cfg)
-        save_config(CONFIG)
+    await replace_config(new_cfg)
     await ctx.reply("Global configuration **replaced**.", mention_author=False)
 
 

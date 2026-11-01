@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 
 from src.logging_setup import logger
+from src.persistence import ConfigPersistenceError
 from src.config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, validate_env
 from src.bot_instance import bot
 # Import commands to ensure they are registered
@@ -29,7 +30,11 @@ async def on_error(event, *args, **kwargs):
 @bot.event
 async def on_command_error(ctx, error):
     """Log command errors."""
-    if isinstance(error, commands.CheckFailure):
+    cause = getattr(error, "original", error)
+    if isinstance(cause, ConfigPersistenceError):
+        logger.error("Configuration persistence failed during command")
+        await ctx.reply("Could not confirm the configuration was saved. Please retry.", mention_author=False)
+    elif isinstance(error, commands.CheckFailure):
         logger.warning(f"Unauthorized command attempt by {ctx.author} in {ctx.channel}: {ctx.message.content}")
     elif isinstance(error, commands.CommandNotFound):
         logger.debug(f"Unknown command by {ctx.author}: {ctx.message.content}")
