@@ -114,6 +114,9 @@ def load_config() -> dict:
     return raw
 
 
+CONFIG_REVISION = 0
+
+
 def save_config(cfg: dict) -> bool:
     """Atomically persist the config. Returns True on success, False on failure.
 
@@ -122,6 +125,9 @@ def save_config(cfg: dict) -> bool:
     the EventStreams worker or a command handler. The in-memory CONFIG remains
     authoritative until the process restarts.
     """
+    # Runtime configuration remains authoritative even if persistence fails.
+    global CONFIG_REVISION
+    CONFIG_REVISION += 1
     tmp = STATE_FILE.with_suffix(".tmp")
     try:
         with tmp.open("w", encoding=UTF8_ENCODING) as fp:
