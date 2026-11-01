@@ -124,6 +124,9 @@ def load_config() -> dict:
     return raw
 
 
+CONFIG_REVISION = 0
+
+
 def save_config(cfg: dict) -> bool:
     """Atomically persist the config. Returns True on success, False on failure.
 
@@ -155,11 +158,12 @@ _CONFIG_DIRTY = False  # An unconfirmed save requires a later write, even for a 
 @asynccontextmanager
 async def _config_edit(*, best_effort=False):
     """Serialize edits and publish only confirmed saves; keep network I/O off-loop."""
-    global _CONFIG_DIRTY
+    global _CONFIG_DIRTY, CONFIG_REVISION
     async with CONFIG_LOCK:
         proposed = deepcopy(CONFIG)
         yield proposed
-        if proposed == CONFIG and not _CONFIG_DIRTY:
+        changed = proposed != CONFIG
+        if not changed and not _CONFIG_DIRTY:
             return
         pending = asyncio.create_task(asyncio.to_thread(save_config, proposed))
         cancelled = False
@@ -177,9 +181,12 @@ async def _config_edit(*, best_effort=False):
         _CONFIG_DIRTY = not saved
         if not saved and best_effort:
             logger.warning("Automatic disable applied only in memory; persistence failed")
-        if saved or best_effort:
+        if changed and (saved or best_effort):
+            # Publish state and revision together on the event loop, without an
+            # await. Routing readers can keep using confirmed state during I/O.
             CONFIG.clear()
             CONFIG.update(proposed)
+            CONFIG_REVISION += 1
         if cancelled:
             raise asyncio.CancelledError
         if not saved and not best_effort:

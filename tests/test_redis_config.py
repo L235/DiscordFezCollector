@@ -266,3 +266,107 @@ def test_export_preserves_configuration_without_overwriting_local_file(redis_sto
     with pytest.raises(FileExistsError):
         export_config(store, path)
     assert json.loads(path.read_text()) == INITIAL
+
+
+@pytest.fixture
+def live_routing(redis_store, monkeypatch):
+    import src.event_streams as streams
+    from src.routing import RoutingPlanCache
+    monkeypatch.setattr(streams, "CONFIG", config.CONFIG)
+    monkeypatch.setattr(streams, "ROUTING_CACHE", RoutingPlanCache())
+    monkeypatch.setattr(streams, "WEBHOOKS", {"healthy": "test-webhook"})
+    return streams
+
+
+def routing_event(user="Alice"):
+    import time
+    return {"timestamp": time.time(), "user": user, "title": "Article", "type": "new", "server_name": "en.wikipedia.org"}
+
+
+async def test_routing_tracks_confirmed_redis_edits_and_raw_replacement(live_routing):
+    await config.set_entity_config_field("threads", "123", "userIncludeList", ["Alice"])
+    assert (await live_routing.get_routing_plan()).route(routing_event()) == [("thread", 123, "title")]
+    await config.set_entity_config_field("threads", "123", "userIncludeList", ["Bob"])
+    assert (await live_routing.get_routing_plan()).route(routing_event()) == []
+    assert (await live_routing.get_routing_plan()).route(routing_event("Bob")) == [("thread", 123, "title")]
+    await config.replace_config({"threads": {}, "receivers": {}})
+    assert (await live_routing.get_routing_plan()).route(routing_event("Bob")) == []
+
+
+async def test_rejected_redis_edit_keeps_the_published_routing_plan(live_routing, redis_store):
+    _, remote = redis_store
+    await config.set_entity_config_field("threads", "123", "userIncludeList", ["Alice"])
+    plan = await live_routing.get_routing_plan()
+    remote.failure = requests.Timeout("unavailable")
+    with pytest.raises(RuntimeError):
+        await config.set_entity_config_field("threads", "123", "userIncludeList", ["Bob"])
+    assert await live_routing.get_routing_plan() is plan
+    assert plan.route(routing_event()) == [("thread", 123, "title")]
+    assert plan.route(routing_event("Bob")) == []
+
+
+@pytest.mark.parametrize("kind", ["thread", "receiver"])
+async def test_routing_refreshes_for_automatic_disables_during_redis_outage(live_routing, redis_store, kind):
+    _, remote = redis_store
+    proposed = copy.deepcopy(INITIAL)
+    proposed["threads"]["123"]["config"]["userIncludeList"] = ["Alice"]
+    proposed["receivers"]["healthy"] = {"active": True, "config": {"userIncludeList": ["Alice"]}}
+    await config.replace_config(proposed)
+    assert len((await live_routing.get_routing_plan()).route(routing_event())) == 2
+    remote.failure = requests.Timeout("unavailable")
+    if kind == "thread":
+        await config.set_custom_thread_active("123", False, best_effort=True)
+        expected = [("receiver", "healthy", "title")]
+    else:
+        await config.set_receiver_errored("healthy")
+        expected = [("thread", 123, "title")]
+    assert (await live_routing.get_routing_plan()).route(routing_event()) == expected
+
+
+@pytest.mark.parametrize("cancel_edit", [False, True])
+async def test_slow_redis_save_does_not_block_routing_or_delivery(live_routing, redis_store, monkeypatch, cancel_edit):
+    from types import SimpleNamespace
+    streams = live_routing
+    _, remote = redis_store
+    await config.replace_config({"threads": {}, "receivers": {
+        "healthy": {"active": True, "config": {"userIncludeList": ["Alice"]}},
+    }})
+    entered, release = threading.Event(), threading.Event()
+    original_send = remote.send
+    def slow_send(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return original_send(*args, **kwargs)
+    monkeypatch.setattr(remote, "send", slow_send)
+    incoming = asyncio.Queue()
+    queue_type = asyncio.Queue
+    monkeypatch.setattr(streams, "asyncio", SimpleNamespace(**dict(vars(asyncio), Queue=lambda maxsize=0: incoming if maxsize == streams.EventStreamConfig.QUEUE_MAX_SIZE else queue_type(maxsize))))
+    monkeypatch.setattr(streams, "threading", SimpleNamespace(Thread=lambda **kwargs: SimpleNamespace(start=lambda: None)))
+    delivered = asyncio.Event()
+    async def send(url, content, key):
+        assert key == "healthy"
+        delivered.set()
+        return True
+    monkeypatch.setattr(streams, "send_webhook_with_backoff", send)
+    edit = asyncio.create_task(config.set_entity_config_field("receivers", "healthy", "userIncludeList", ["Bob"]))
+    worker = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        incoming.put_nowait(routing_event())
+        worker = asyncio.create_task(streams.stream_worker(None))
+        await asyncio.wait_for(delivered.wait(), 1)
+        assert not edit.done()
+        if cancel_edit:
+            edit.cancel()
+    finally:
+        if worker is not None:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        release.set()
+        if cancel_edit and edit.cancelling():
+            with pytest.raises(asyncio.CancelledError):
+                await edit
+        else:
+            await edit
+    assert (await streams.get_routing_plan()).route(routing_event()) == []
+    assert (await streams.get_routing_plan()).route(routing_event("Bob")) == [("receiver", "healthy", "title")]

@@ -1,6 +1,5 @@
 import asyncio
 import concurrent.futures
-import json
 import logging
 import os
 import signal
@@ -8,7 +7,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import discord
 import requests
@@ -21,10 +20,12 @@ from src.constants import (
     TRUNCATED_MESSAGE_SUFFIX,
 )
 from src.logging_setup import logger
-from src.models import EventStreamConfig, RetryConfig, CustomFilter
+from src.models import EventStreamConfig, RetryConfig
+from src import config as config_state
+from src.delivery import DestinationDispatcher
+from src.routing import RoutingPlanCache
 from src.config import (
     CONFIG,
-    CONFIG_LOCK,
     WEBHOOKS,
     USER_AGENT,
     STALENESS_SECS,
@@ -63,19 +64,18 @@ stream = EventStreams(
 # ── Caches & runtime state                                                   #
 # --------------------------------------------------------------------------- #
 
-#  thread_id → (fingerprint, CustomFilter)
-FILTER_CACHE: Dict[int, Tuple[str, CustomFilter]] = {}
+ROUTING_CACHE = RoutingPlanCache()
 #  thread_id → discord.Thread
 THREAD_CACHE: Dict[int, discord.Thread] = {}
-#  receiver_key → (fingerprint, CustomFilter)
-RECEIVER_FILTER_CACHE: Dict[str, Tuple[str, CustomFilter]] = {}
 #  Track last event received time (for health monitoring)
 _last_event_lock = threading.Lock()
 last_event_time: Optional[float] = None
 
-def _fingerprint(cfg: dict) -> str:
-    """Deterministic (& cheap) fingerprint for a config dict."""
-    return json.dumps(cfg, sort_keys=True)
+async def get_routing_plan():
+    # _config_edit publishes state and revision synchronously on this loop.
+    # Do not acquire its edit lock: it spans potentially slow storage I/O.
+    return ROUTING_CACHE.get(CONFIG, WEBHOOKS, config_state.CONFIG_REVISION)
+
 
 def _event_ts_to_epoch(change: dict) -> Optional[float]:
     """
@@ -258,63 +258,6 @@ async def stream_worker(channel: discord.TextChannel):
     logger.info("Starting EventStreams worker")
     loop = asyncio.get_running_loop()
 
-    async def active_custom_filters() -> List[Tuple[int, CustomFilter]]:
-        """
-        Return list of (thread_id, CustomFilter) for **active** custom threads,
-        rebuilding a filter only if its config actually changed.
-        """
-        async with CONFIG_LOCK:
-            snapshot = list(CONFIG["threads"].items())
-
-        out: List[Tuple[int, CustomFilter]] = []
-        for tid_str, entry in snapshot:
-            if not entry.get("active", False):
-                FILTER_CACHE.pop(int(tid_str), None)
-                continue
-            tid = int(tid_str)
-            fp = _fingerprint(entry["config"])
-            cached = FILTER_CACHE.get(tid)
-            if cached and cached[0] == fp:
-                filt = cached[1]
-            else:
-                filt = CustomFilter(entry["config"])
-                FILTER_CACHE[tid] = (fp, filt)
-            out.append((tid, filt))
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Found %d active custom filters", len(out))
-        return out
-
-    async def active_receiver_filters() -> List[Tuple[str, CustomFilter]]:
-        """
-        Return list of (receiver_key, CustomFilter) for **active** receivers,
-        rebuilding a filter only if its config actually changed.
-        """
-        async with CONFIG_LOCK:
-            snapshot = list(CONFIG.get("receivers", {}).items())
-
-        out: List[Tuple[str, CustomFilter]] = []
-        for key, entry in snapshot:
-            # Skip inactive or errored receivers, or those without webhook URLs
-            if not entry.get("active", False) or entry.get("errored", False):
-                RECEIVER_FILTER_CACHE.pop(key, None)
-                continue
-            if key not in WEBHOOKS:
-                logger.warning(f"Receiver '{key}' active but no webhook URL in env")
-                continue
-            fp = _fingerprint(entry["config"])
-            cached = RECEIVER_FILTER_CACHE.get(key)
-            if cached and cached[0] == fp:
-                filt = cached[1]
-            else:
-                filt = CustomFilter(entry["config"])
-                RECEIVER_FILTER_CACHE[key] = (fp, filt)
-            out.append((key, filt))
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Found %d active receiver filters", len(out))
-        return out
-
     async def get_thread_obj(tid: int) -> Optional[discord.Thread]:
         """Return cached discord.Thread or fetch & cache it."""
         th = THREAD_CACHE.get(tid)
@@ -336,6 +279,36 @@ async def stream_worker(channel: discord.TextChannel):
             THREAD_CACHE[tid] = ch
             return ch
         return None
+
+    async def deliver(destination, message):
+        kind, key = destination
+        # This synchronous read sees only the last atomically published state.
+        entity_type = "threads" if kind == "thread" else "receivers"
+        entry = CONFIG.get(entity_type, {}).get(str(key))
+        if not entry or not entry.get("active", False) or entry.get("errored", False):
+            return
+        if kind == "thread":
+            target = await get_thread_obj(key)
+            if target is not None:
+                sent = await send_message_with_backoff(target, message)
+                if sent is None:
+                    THREAD_CACHE.pop(key, None)
+            return
+        webhook_url = WEBHOOKS.get(key)
+        if not webhook_url:
+            return
+        try:
+            await send_webhook_with_backoff(webhook_url, message, key)
+        except WebhookError as exc:
+            logger.error("Webhook error for receiver '%s': %s", key, exc)
+            await set_receiver_errored(key)
+            await _announce(channel, format_receiver_disabled_notice(key, str(exc)))
+        except TransientWebhookError:
+            logger.debug("Transient webhook failure for receiver '%s': event dropped", key)
+
+    dispatcher = DestinationDispatcher(
+        deliver, max_queue=EventStreamConfig.DESTINATION_QUEUE_MAX_SIZE
+    )
 
     # ------------------------------------------------------------------ #
     # Consume the blocking EventStreams iterator in a thread-pool so the
@@ -451,133 +424,30 @@ async def stream_worker(channel: discord.TextChannel):
     t = threading.Thread(target=_producer, daemon=True, name="eventstream-producer")
     t.start()
 
-    while True:
-        change = await event_queue.get()
-
-        # Robust timestamp handling
-        ts = _event_ts_to_epoch(change)
-        if ts is None:
-            # If we cannot determine freshness, treat as *not stale* but log once.
-            # To avoid log spam, gate on an attribute.
-            if not getattr(stream_worker, "_warned_missing_ts", False):
-                logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
-                setattr(stream_worker, "_warned_missing_ts", True)
-            stale = False
-        else:
-            current_time = datetime.now(timezone.utc).timestamp()
-            stale = (current_time - ts) > STALENESS_SECS
-
-        # Some events may lack user (rare for rc, common for revision-create)
-        user = change.get("user")
-        if stale:
-            event_queue.task_done()
-            continue
-        if not user:
-            # Nothing sensible to route; skip quietly.
-            event_queue.task_done()
-            continue
-
-        # Determine routing targets: (thread_id, messageable, link_style) tuples.
-        # The thread_id is carried so a failed send can evict the cached thread
-        # object (see the send loop below).
-        targets: List[Tuple[int, discord.abc.Messageable, str]] = []
-        receiver_targets: List[Tuple[str, str]] = []  # (key, link_style)
-
-        # Custom threads and receivers
-        customs = await active_custom_filters()
-        receivers = await active_receiver_filters()
-
-        # ----------  (#2) ultra-cheap global short-circuit ---------------- #
-        # Combine filters from both threads and receivers for fast-reject
-        all_filters = [f for _, f in customs] + [f for _, f in receivers]
-        user_whitelist = {u for f in all_filters for u in f.user_include}
-        page_regexes = [f.page_include for f in all_filters if f.page_include]
-        summary_regexes = [f.sum_include for f in all_filters if f.sum_include]
-
-        title = change.get("title", "")
-        comment = change.get("log_action_comment") or change.get("comment") or ""
-
-        if (
-            change["user"] not in user_whitelist
-            and not any(rx.search(title) for rx in page_regexes)
-            and not any(rx.search(comment) for rx in summary_regexes)
-        ):
-            event_queue.task_done()
-            continue  # fast reject before any regex-heavy work
-
-        # Match against thread filters
-        if customs:
-            for tid, filt in customs:
-                try:
-                    if filt.matches(change):
-                        th = await get_thread_obj(tid)
-                        if th is not None:
-                            targets.append((tid, th, filt.link_style))
-                except Exception as e:  # pragma: no cover
-                    logger.warning(f"Custom filter error for {tid}: {e}")
-
-        # Match against receiver filters
-        if receivers:
-            for key, filt in receivers:
-                try:
-                    if filt.matches(change):
-                        receiver_targets.append((key, filt.link_style))
-                except Exception as e:
-                    logger.warning(f"Receiver filter error for '{key}': {e}")
-
-        if not targets and not receiver_targets:
-            event_queue.task_done()
-            continue  # nothing to do
-
-        # Cache formatted messages by link_style to avoid re-formatting
-        _msg_cache: Dict[str, str] = {}
-        def _get_msg(style: str, _change: dict = change) -> str:
-            if style not in _msg_cache:
-                msg = format_change(_change, link_style=style)
-                if len(msg) > DISCORD_MESSAGE_LIMIT:
-                    msg = msg[:DISCORD_MESSAGE_LIMIT - TRUNCATION_RESERVE] + TRUNCATED_MESSAGE_SUFFIX
-                _msg_cache[style] = msg
-            return _msg_cache[style]
-
-        # Send to thread targets with rate limit handling
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Sending change to %d thread(s) and %d receiver(s)",
-                len(targets),
-                len(receiver_targets),
-            )
-        for tid, tgt, style in targets:
-            sent = await send_message_with_backoff(tgt, _get_msg(style))
-            if sent is None:
-                # Send to a cached thread failed (deleted, access revoked, or a
-                # transient blip). Evict it so the next matching event misses the
-                # cache and re-runs get_thread_obj's classification: a successful
-                # refetch means it was transient (re-cached, no harm); a
-                # NotFound/Forbidden deactivates the thread and announces it.
-                # Without this, a thread that goes permanently unsendable while
-                # cached would drop every event silently — the same silent
-                # failure this change set is meant to eliminate.
-                THREAD_CACHE.pop(tid, None)
-
-        # Send to receiver webhooks (uses discord.py native webhook support)
-        for key, style in receiver_targets:
-            webhook_url = WEBHOOKS.get(key)
-            if not webhook_url:
-                logger.warning(f"Receiver '{key}' matched but no webhook URL")
-                continue
+    try:
+        while True:
+            change = await event_queue.get()
             try:
-                await send_webhook_with_backoff(webhook_url, _get_msg(style), key)
-            except WebhookError as e:
-                # Permanent failure (404/403/401/bad URL): disable the receiver
-                # so it stops trying a webhook that cannot succeed, and announce
-                # it in the main channel so the silent death gets noticed.
-                logger.error(f"Webhook error for receiver '{key}': {e}")
-                await set_receiver_errored(key)
-                await _announce(channel, format_receiver_disabled_notice(key, str(e)))
-            except TransientWebhookError as e:
-                # Recoverable failure (5xx/network/timeout): drop this one event
-                # but keep the receiver active so a passing hiccup cannot silence
-                # it indefinitely. (Already logged at WARNING in the sender.)
-                logger.debug(f"Transient webhook failure for receiver '{key}': {e}")
+                ts = _event_ts_to_epoch(change)
+                if ts is None:
+                    if not getattr(stream_worker, "_warned_missing_ts", False):
+                        logger.warning("Event without timestamp encountered; treating as fresh. Further warnings suppressed.")
+                        setattr(stream_worker, "_warned_missing_ts", True)
+                elif time.time() - ts > STALENESS_SECS:
+                    continue
+                if not change.get("user"):
+                    continue
 
-        event_queue.task_done()
+                plan = await get_routing_plan()
+                messages = {}
+                for kind, key, style in plan.route(change):
+                    if style not in messages:
+                        message = format_change(change, link_style=style)
+                        if len(message) > DISCORD_MESSAGE_LIMIT:
+                            message = message[:DISCORD_MESSAGE_LIMIT - TRUNCATION_RESERVE] + TRUNCATED_MESSAGE_SUFFIX
+                        messages[style] = message
+                    dispatcher.submit((kind, key), messages[style])
+            finally:
+                event_queue.task_done()
+    finally:
+        await dispatcher.close()
